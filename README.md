@@ -62,6 +62,7 @@ Requirements: Node.js 22.13 or newer and npm.
 ```bash
 npm ci
 cp .env.example .env
+npx wrangler d1 migrations apply DB --local --config wrangler.local.json --persist-to .wrangler/state
 npm run dev
 ```
 

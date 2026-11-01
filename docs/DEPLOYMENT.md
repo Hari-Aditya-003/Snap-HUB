@@ -56,15 +56,16 @@ Enable the Drive API and configure a web OAuth client and consent screen in your
 
 [db/index.ts](../db/index.ts) requires the Cloudflare D1 `DB` binding. [vite.config.ts](../vite.config.ts) provides a local database named `site-creator-d1` with a placeholder ID; this is not a real production database ID.
 
-The generated production build contains the Worker configuration at `dist/server/wrangler.json`. After building, initialize the local database from the checked-in migrations:
+The checked-in [local migration config](../wrangler.local.json) points directly to `drizzle/` and uses the same placeholder database ID as Vite. Initialize the local database before using database-backed routes:
 
 ```bash
-npm run build
-npx wrangler d1 migrations apply DB --local --config dist/server/wrangler.json --persist-to .wrangler/state
-npm start
+npx wrangler d1 migrations apply DB --local --config wrangler.local.json --persist-to .wrangler/state
+npm run dev
 ```
 
-Use the URL printed by Wrangler for this built preview and register that origin's OAuth callback separately if exercising Google login there. This preview may use a different port from `npm run dev`. Check the generated config's migration directory and D1 binding if Wrangler cannot discover the migrations.
+For a built local preview, run `npm run build` and then `npm start`. The generated Worker config is `dist/server/wrangler.json`. Its default migration directory is `migrations/`, which is absent in this checkout; use `wrangler.local.json` for local migration commands.
+
+Use the URL printed by Wrangler for the built preview and register that origin's OAuth callback separately if exercising Google login there. This preview may use a different port from `npm run dev`. Use the local migration config above if Wrangler cannot discover the migrations. Never add `--remote` to this local setup command.
 
 For a schema change, edit `db/schema.ts`, run `npm run db:generate`, review the generated SQL, and commit the migration and Drizzle metadata. A schema file alone does not update an existing database.
 
