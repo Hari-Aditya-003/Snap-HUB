@@ -8,14 +8,18 @@ Snap HUB is a private event photo and video sharing platform. A host creates an 
 
 The project is currently in testing stage. Purchases and paid plans are intentionally disabled.
 
-## Live product
+## Standalone deployment
 
-- Website: <https://snap-hub-events.mr-adityahari.chatgpt.site>
-- Host workspace: <https://snap-hub-events.mr-adityahari.chatgpt.site/admin>
+Snap HUB deploys to **Cloudflare Workers in your own Cloudflare account**, with D1 for metadata and Google Drive for original media. No ChatGPT account, Sites project, or ChatGPT-hosted domain is required.
+
+Use the HTTPS URL returned by your Cloudflare deployment, or attach your own domain. See [deployment](docs/DEPLOYMENT.md) for account setup, secrets, OAuth, database migrations, and publishing.
+
+- Worker configuration: `wrangler.json`
 - iOS app: `ios/SnapHUB/SnapHUB.xcodeproj`
+- iOS server setting: `SNAPHUB_SERVER_URL`
 - Bundle identifier: `com.mradityahari.snaphub`
 
-Host credentials are configured as deployment secrets and are never committed to the repository.
+Host credentials are runtime secrets and are never committed to the repository.
 
 ## What is included
 
@@ -32,12 +36,12 @@ Host credentials are configured as deployment secrets and are never committed to
 - Database-backed event activity for gallery views, guest uploads, and downloads
 - Host-controlled live slideshow with previous, next, pause, resume, restart, and ambient music
 - Responsive guest and host web experiences with installable PWA metadata
-- Native SwiftUI iPhone/iPad host shell connected to the production workspace
+- Native SwiftUI iPhone/iPad host shell with a configurable server origin
 
 ## Architecture
 
 - Next.js-compatible React application built with Vinext and Vite
-- Cloudflare Worker runtime through OpenAI Sites
+- Cloudflare Workers deployed directly with Wrangler
 - D1 for event and media metadata
 - Google Drive for every original photo and video; the Site keeps no media-object storage
 - SwiftUI and `WKWebView` for the signed iOS host app
@@ -62,7 +66,7 @@ Requirements: Node.js 22.13 or newer and npm.
 ```bash
 npm ci
 cp .env.example .env
-npx wrangler d1 migrations apply DB --local --config wrangler.local.json --persist-to .wrangler/state
+npm run db:migrate:local
 npm run dev
 ```
 
@@ -72,21 +76,22 @@ Useful checks:
 
 ```bash
 npm run lint
-npm run build
+npm test
+npm run deploy:check
 ```
 
-Database migrations live in `drizzle/`. The Sites build workflow applies production migrations during deployment.
+Database migrations live in `drizzle/`. Local migrations use a local database; `npm run db:migrate:remote` explicitly applies them to your configured Cloudflare account. `npm test` builds the real Worker and checks its login, authorization, database access, and standalone artifact in an isolated local runtime.
 
 ## iOS build and installation
 
-Open `ios/SnapHUB/SnapHUB.xcodeproj` in Xcode. The project targets iOS/iPadOS 17 or newer and uses automatic signing for the configured Apple development team.
+Open `ios/SnapHUB/SnapHUB.xcodeproj` in Xcode. Set the target’s user-defined `SNAPHUB_SERVER_URL` build setting to your deployed HTTPS origin (no `/admin` suffix), then choose your signing team. The project targets iOS/iPadOS 17 or newer and uses automatic signing for the configured Apple development team.
 
 1. Connect and trust the iPhone or iPad.
 2. Enable Developer Mode on the device.
 3. Select the physical device as the run destination.
 4. Build and run the `SnapHUB` scheme.
 
-The app loads the production host workspace, keeps the authenticated web session in its default WebKit data store, and provides native Home, Events, Uploads, Live, and Settings navigation.
+The app loads the host workspace at the configured origin, keeps the authenticated web session in its default WebKit data store, and provides native Home, Events, Uploads, Live, and Settings navigation.
 
 ## Access model
 
@@ -97,7 +102,7 @@ The app loads the production host workspace, keeps the authenticated web session
 
 ## Deployment
 
-The repository is linked to OpenAI Sites by `.openai/hosting.json`. Production runtime values are managed as Sites environment variables and secrets; do not add credentials to source files.
+Run `npm run deploy` after configuring your own Cloudflare account, D1 database, and runtime secrets. The command builds the Worker, applies remote D1 migrations, and deploys `dist/server/wrangler.json`. Google Drive uploads require a Google OAuth web client and the callback URI for the deployed origin. Follow the [complete deployment guide](docs/DEPLOYMENT.md).
 
 ## Documentation and contributions
 

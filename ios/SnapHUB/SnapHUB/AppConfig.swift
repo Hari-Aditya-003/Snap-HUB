@@ -1,7 +1,16 @@
 import SwiftUI
 
 enum AppConfig {
-    static let siteURL = URL(string: "https://snap-hub-events.mr-adityahari.chatgpt.site")!
+    static let siteURL: URL? = {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: "SnapHUBServerURL") as? String,
+              let parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parts.scheme == "https", let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil,
+              parts.query == nil, parts.fragment == nil,
+              parts.path.isEmpty || parts.path == "/"
+        else { return nil }
+        return parts.url
+    }()
 }
 
 enum SnapTheme {

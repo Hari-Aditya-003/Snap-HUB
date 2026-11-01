@@ -33,12 +33,20 @@ final class WebViewModel: NSObject {
 
     func navigate(to section: HostSection) {
         selectedSection = section
-        guard let url = URL(string: section.path, relativeTo: AppConfig.siteURL)?.absoluteURL else { return }
+        guard let siteURL = AppConfig.siteURL,
+              let url = URL(string: section.path, relativeTo: siteURL)?.absoluteURL else {
+            connectionMessage = "Set the SNAPHUB_SERVER_URL build setting to your deployed HTTPS server address, then rebuild the app."
+            return
+        }
         connectionMessage = nil
         webView.load(URLRequest(url: url, cachePolicy: .reloadRevalidatingCacheData, timeoutInterval: 30))
     }
 
     func reload() {
+        guard webView.url != nil else {
+            navigate(to: selectedSection)
+            return
+        }
         connectionMessage = nil
         webView.reload()
     }
@@ -77,7 +85,8 @@ extension WebViewModel: WKNavigationDelegate {
             return .cancel
         }
 
-        if let host = url.host, host != AppConfig.siteURL.host {
+        guard let siteURL = AppConfig.siteURL else { return .cancel }
+        if let host = url.host, host != siteURL.host {
             await UIApplication.shared.open(url)
             return .cancel
         }

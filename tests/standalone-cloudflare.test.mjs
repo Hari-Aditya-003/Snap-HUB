@@ -20,7 +20,7 @@ before(async () => {
   state = mkdtempSync(join(tmpdir(), "snap-hub-cloudflare-test-"));
   const migration = spawnSync(process.execPath, [wrangler, "d1", "migrations", "apply", "DB",
     "--local", "--config", join(root, "wrangler.json"), "--persist-to", state],
-  { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, CI: "true" } });
+  { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" } });
   assert.equal(migration.status, 0, "Local migrations must succeed for an independent database");
 
   const socket = createServer();

@@ -30,7 +30,7 @@ npm run lint
 npm run build
 ```
 
-There is no `npm test` script. Describe manual checks for affected host/guest flows. Schema changes must include generated, reviewed Drizzle migrations. Use your own OAuth project and development data; never publish a fork into the original Sites project.
+Run `npm test` for the standalone Worker integration suite and describe manual checks for affected host/guest flows. Schema changes must include generated, reviewed Drizzle migrations. Use your own OAuth project and development data; use your own Worker, Cloudflare account, and D1 database for a fork.
 
 ## Submit a pull request
 

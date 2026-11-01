@@ -47,13 +47,15 @@ struct ContentView: View {
 
             Spacer()
 
-            ShareLink(item: model.currentURL ?? AppConfig.siteURL) {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.headline)
-                    .frame(width: 38, height: 38)
-                    .background(.white.opacity(0.8), in: Circle())
+            if let shareURL = model.currentURL ?? AppConfig.siteURL {
+                ShareLink(item: shareURL) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.headline)
+                        .frame(width: 38, height: 38)
+                        .background(.white.opacity(0.8), in: Circle())
+                }
+                .accessibilityLabel("Share current Snap HUB page")
             }
-            .accessibilityLabel("Share current Snap HUB page")
 
             Button(action: model.reload) {
                 Image(systemName: "arrow.clockwise")
