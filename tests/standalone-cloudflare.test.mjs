@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -22,21 +21,31 @@ before(async () => {
     "--local", "--config", join(root, "wrangler.json"), "--persist-to", state],
   { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" } });
   assert.equal(migration.status, 0, "Local migrations must succeed for an independent database");
+  const seed = spawnSync(process.execPath, [wrangler, "d1", "execute", "DB", "--local",
+    "--config", join(root, "wrangler.json"), "--persist-to", state, "--command",
+    "INSERT INTO albums (id, title, access_token, guest_username, guest_password_hash, created_at) VALUES ('integration-event', 'Integration event', 'integration-token', 'test-guest', 'unused-test-hash', 1)"],
+  { cwd: root, encoding: "utf8", timeout: 60_000, env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" } });
+  assert.equal(seed.status, 0, "The isolated database fixture must be inserted");
 
-  const socket = createServer();
-  await new Promise((done, reject) => socket.listen(0, "127.0.0.1", done).once("error", reject));
-  const port = socket.address().port;
-  await new Promise((done) => socket.close(done));
-  origin = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, [wrangler, "dev", "--local", "--config", builtConfig,
-    "--persist-to", state, "--ip", "127.0.0.1", "--port", String(port), "--inspector-port", "0",
+    "--persist-to", state, "--ip", "127.0.0.1", "--port", "0", "--inspector-port", "0",
     "--var", "ADMIN_USERNAME:standalone-test", "--var", "ADMIN_PASSWORD:test-only-password",
     "--var", "SESSION_SECRET:test-only-session-secret-with-at-least-32-characters"],
-  { cwd: root, stdio: "ignore", detached: process.platform !== "win32", env: { ...process.env, CI: "true" } });
+  { cwd: root, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32",
+    env: { ...process.env, CI: "true", WRANGLER_SEND_METRICS: "false" } });
+  let startup = "";
+  const readStartup = (chunk) => {
+    startup = (startup + chunk.toString()).slice(-8192);
+    const match = startup.match(/Ready on (http:\/\/127\.0\.0\.1:\d+)/);
+    if (match) origin = match[1];
+  };
+  server.stdout.on("data", readStartup);
+  server.stderr.on("data", readStartup);
 
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     if (server.exitCode !== null) throw new Error("Local Worker exited before accepting requests");
+    if (!origin) { await delay(250); continue; }
     try {
       const response = await fetch(`${origin}/api/albums`, { signal: AbortSignal.timeout(1000) });
       if (response.status === 401) return;
@@ -101,7 +110,9 @@ test("host login and D1-backed album listing work without ChatGPT", async () => 
   const response = await fetch(`${origin}/api/albums`, { headers: { cookie: cookie.split(";")[0] } });
   assert.equal(response.status, 200);
   const data = await response.json();
-  assert.deepEqual(data.albums, []);
+  assert.equal(data.albums.length, 1);
+  assert.equal(data.albums[0].id, "integration-event");
+  assert.equal(data.albums[0].title, "Integration event");
   assert.deepEqual(data.photos, []);
   assert.deepEqual(data.collections, []);
 });

@@ -2,18 +2,26 @@
 
 Snap HUB runs directly on Cloudflare Workers in the owner's Cloudflare account. D1 stores event metadata, Google Drive stores original media, and the iOS host app loads your deployed HTTPS origin. The application does not require a Sites project, a ChatGPT account, or a ChatGPT-hosted domain.
 
+## Current standalone deployment
+
+- Website: [https://snap-hub.snap-hub.workers.dev](https://snap-hub.snap-hub.workers.dev)
+- Host workspace: [https://snap-hub.snap-hub.workers.dev/admin](https://snap-hub.snap-hub.workers.dev/admin)
+- Google OAuth callback: `https://snap-hub.snap-hub.workers.dev/api/admin/google-drive/callback`
+
+The Worker is published. Google Drive client credentials and host consent must be configured before uploads or legacy-media transfer are available.
+
 ## Local setup
 
 Use Node.js 22.13 or newer and npm:
 
 ```bash
 npm ci
-cp .env.example .env
+cp .dev.vars.example .dev.vars
 npm run db:migrate:local
 npm run dev
 ```
 
-Fill `.env` before using authentication or Google Drive. Development runs at `http://127.0.0.1:5173`. The local migration command uses `--local` and never modifies the remote database.
+Fill `.dev.vars` before using authentication or Google Drive. Development runs at `http://127.0.0.1:5173`. The local migration command uses `--local` and never modifies the remote database.
 
 | Runtime secret | Purpose |
 | --- | --- |
@@ -76,7 +84,7 @@ The deploy command builds `dist/server/`, applies remote migrations, and publish
 
 Keep schema changes backward-compatible with the previously deployed Worker. Use expand-and-contract migrations so a successful migration followed by failed publication does not break the active version.
 
-For automatic deployments, connect the repository to the Worker through Cloudflare Workers Builds. Use `npm ci` to install, `npm test` to build/verify, and `npm run deploy` to publish from the intended production branch. Runtime secrets belong to the Worker; local `.env` files are not automatically uploaded. A GitHub push alone does not deploy unless you configure that integration.
+For automatic deployments, connect the repository to the Worker through Cloudflare Workers Builds. Use `npm ci` to install, `npm test` to build/verify, and `npm run deploy` to publish from the intended production branch. Runtime secrets belong to the Worker; local `.dev.vars` files are not automatically uploaded. A GitHub push alone does not deploy unless you configure that integration.
 
 ## Google Drive setup
 

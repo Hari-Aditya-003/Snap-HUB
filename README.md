@@ -12,7 +12,7 @@ The project is currently in testing stage. Purchases and paid plans are intentio
 
 Snap HUB deploys to **Cloudflare Workers in your own Cloudflare account**, with D1 for metadata and Google Drive for original media. No ChatGPT account, Sites project, or ChatGPT-hosted domain is required.
 
-Use the HTTPS URL returned by your Cloudflare deployment, or attach your own domain. See [deployment](docs/DEPLOYMENT.md) for account setup, secrets, OAuth, database migrations, and publishing.
+Live website: [snap-hub.snap-hub.workers.dev](https://snap-hub.snap-hub.workers.dev). Host workspace: [admin](https://snap-hub.snap-hub.workers.dev/admin). You can also attach your own domain. See [deployment](docs/DEPLOYMENT.md) for account setup, secrets, OAuth, database migrations, and publishing.
 
 - Worker configuration: `wrangler.json`
 - iOS app: `ios/SnapHUB/SnapHUB.xcodeproj`
@@ -65,12 +65,12 @@ Requirements: Node.js 22.13 or newer and npm.
 
 ```bash
 npm ci
-cp .env.example .env
+cp .dev.vars.example .dev.vars
 npm run db:migrate:local
 npm run dev
 ```
 
-Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.env`. Add a Google OAuth web client as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; its authorized redirect URI is `<site-origin>/api/admin/google-drive/callback`. The development server starts on <http://127.0.0.1:5173>.
+Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.dev.vars`. Add a Google OAuth web client as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; its authorized redirect URI is `<site-origin>/api/admin/google-drive/callback`. The development server starts on <http://127.0.0.1:5173>.
 
 Useful checks:
 
