@@ -44,7 +44,7 @@ The documented development URL is [127.0.0.1:5173](http://127.0.0.1:5173). Set t
 http://127.0.0.1:5173/api/admin/google-drive/callback
 ```
 
-`localhost` and `127.0.0.1` are different origins. The production callback is:
+Google's [web-server OAuth redirect rules](https://developers.google.com/identity/protocols/oauth2/web-server#uri-validation) exempt localhost IP addresses from the raw-IP restriction. `localhost` and `127.0.0.1` are different origins. The production callback is:
 
 ```text
 https://snap-hub-events.mr-adityahari.chatgpt.site/api/admin/google-drive/callback
@@ -67,7 +67,7 @@ For a built local preview, run `npm run build` and then `npm start`. The generat
 
 Use the URL printed by Wrangler for the built preview and register that origin's OAuth callback separately if exercising Google login there. This preview may use a different port from `npm run dev`. Use the local migration config above if Wrangler cannot discover the migrations. Never add `--remote` to this local setup command.
 
-For a schema change, edit `db/schema.ts`, run `npm run db:generate`, review the generated SQL, and commit the migration and Drizzle metadata. A schema file alone does not update an existing database.
+For a schema change, edit `db/schema.ts`, run `npm run db:generate`, review the generated SQL, and commit the migration and Drizzle metadata. A schema file alone does not update an existing database. Use backward-compatible expand-and-contract migrations: add compatible structures first, deploy code using them, and remove obsolete structures in a later release. If migration succeeds but Worker publication fails, the previously active Worker must still function.
 
 ## 3. Validate a release
 

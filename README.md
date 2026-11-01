@@ -2,7 +2,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/Hari-Aditya-003/Snap-HUB?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/Hari-Aditya-003/Snap-HUB?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/forks)
-[![Default branch](https://img.shields.io/badge/branch-main-2563eb?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/branches)
+[![Default branch](https://img.shields.io/badge/branch-main-2563eb?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/tree/main)
 
 Snap HUB is a private event photo and video sharing platform. A host creates an event, uploads and moderates memories, then shares one QR code. Guests open the gallery in a browser, so they do not need to install an app.
 
