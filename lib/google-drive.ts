@@ -2,6 +2,7 @@ import "server-only";
 
 import { env } from "cloudflare:workers";
 import type { AlbumRecord } from "@/lib/data";
+import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -52,7 +53,7 @@ function base64UrlToBytes(value: string) {
 async function encryptionKey() {
   const material = await crypto.subtle.digest(
     "SHA-256",
-    encoder.encode(`snap-hub-google-drive:${env.SESSION_SECRET}`),
+    encoder.encode(`snap-hub-google-drive:${getSessionSecret()}`),
   );
   return crypto.subtle.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
@@ -81,7 +82,7 @@ async function decryptRefreshToken(value: string) {
 async function oauthSigningKey() {
   return crypto.subtle.importKey(
     "raw",
-    encoder.encode(env.SESSION_SECRET),
+    encoder.encode(getSessionSecret()),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign", "verify"],
@@ -198,9 +199,11 @@ async function driveJson<T>(url: string, init: RequestInit = {}, suppliedAccessT
     headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
   });
   if (!response.ok) {
-    const body = await response.json().catch(() => null) as { error?: { message?: string } } | null;
-    const message = body?.error?.message || `Google Drive request failed with ${response.status}.`;
-    throw new GoogleDriveError(message, response.status === 404 ? 404 : 502);
+    if (response.status === 401 || response.status === 403) {
+      throw new GoogleDriveError("Google Drive authorization must be renewed.", 503);
+    }
+    if (response.status === 404) throw new GoogleDriveError("The Google Drive item was not found.", 404);
+    throw new GoogleDriveError("Google Drive could not complete the request.", 502);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -354,7 +357,11 @@ export async function uploadDriveMedia(file: File, folderId: string, metadata: {
   });
   const location = initiate.headers.get("location");
   if (!initiate.ok || !location) throw new GoogleDriveError("Could not start the Google Drive upload.");
-  const uploaded = await fetch(location, {
+  const uploadUrl = new URL(location);
+  if (uploadUrl.protocol !== "https:" || !uploadUrl.hostname.endsWith(".googleapis.com")) {
+    throw new GoogleDriveError("Google Drive returned an invalid upload destination.");
+  }
+  const uploaded = await fetch(uploadUrl, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${token}`,

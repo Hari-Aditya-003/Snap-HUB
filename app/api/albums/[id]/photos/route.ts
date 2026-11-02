@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getAlbumById } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { isAdmin } from "@/lib/security";
-import { isAllowedMedia } from "@/lib/uploads";
+import { hasValidMediaSignature } from "@/lib/uploads";
 
 const MAX_FILE_SIZE = 75 * 1024 * 1024;
 
@@ -15,6 +15,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const form = await request.formData();
   const files = form.getAll("photos").filter((item): item is File => item instanceof File);
   if (!files.length) return NextResponse.json({ error: "Choose at least one photo" }, { status: 400 });
+  if (files.length > 20) return NextResponse.json({ error: "Upload up to 20 items at a time" }, { status: 400 });
+  if (files.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+    return NextResponse.json({ error: "This upload is over 100 MB. Send it in smaller batches." }, { status: 400 });
+  }
   const collectionId = String(form.get("collectionId") ?? "") || null;
   const caption = String(form.get("caption") ?? "").trim().slice(0, 240);
   if (collectionId) {
@@ -27,7 +31,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     const folders = await ensureEventDriveFolders(album);
     for (const file of files) {
-      const supported = isAllowedMedia(file);
+      const supported = await hasValidMediaSignature(file);
       if (!supported || file.size > MAX_FILE_SIZE) continue;
       const photoId = crypto.randomUUID();
       const folderId = file.type.startsWith("video/") ? folders.videosFolderId : folders.photosFolderId;

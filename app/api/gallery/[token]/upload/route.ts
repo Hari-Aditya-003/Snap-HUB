@@ -5,13 +5,13 @@ import { getAlbumByToken } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { canViewGallery } from "@/lib/security";
 import { isRateLimited } from "@/lib/rate-limit";
-import { isAllowedMedia } from "@/lib/uploads";
+import { hasValidMediaSignature } from "@/lib/uploads";
 
 const MAX_FILE_SIZE = 75 * 1024 * 1024;
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
-  if (isRateLimited(request, `guest-upload:${token}`, 8, 10 * 60 * 1000)) {
+  if (await isRateLimited(request, `guest-upload:${token}`, 8, 10 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many uploads. Please try again in a few minutes." }, { status: 429 });
   }
   const album = await getAlbumByToken(token);
@@ -43,7 +43,7 @@ export async function POST(request: Request, context: { params: Promise<{ token:
   try {
     const folders = await ensureEventDriveFolders(album);
     for (const file of files) {
-      if (!isAllowedMedia(file) || file.size > MAX_FILE_SIZE) continue;
+      if (!(await hasValidMediaSignature(file)) || file.size > MAX_FILE_SIZE) continue;
       const photoId = crypto.randomUUID();
       const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" });
       try {

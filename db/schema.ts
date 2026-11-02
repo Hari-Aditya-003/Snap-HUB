@@ -94,3 +94,9 @@ export const googleDriveConnections = sqliteTable("google_drive_connections", {
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
+
+export const rateLimitBuckets = sqliteTable("rate_limit_buckets", {
+  scopeKey: text("scope_key").primaryKey(),
+  count: integer("count").notNull(),
+  resetAt: integer("reset_at").notNull(),
+});

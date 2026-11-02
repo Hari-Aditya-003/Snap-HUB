@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { createGallerySession, hashGuestPassword } from "@/lib/security";
+import { createGallerySession, hashGuestPassword, secureEqual } from "@/lib/security";
 import { getAlbumByToken } from "@/lib/data";
 import { isRateLimited } from "@/lib/rate-limit";
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
-  if (isRateLimited(request, `gallery-unlock:${token}`, 15, 10 * 60 * 1000)) {
+  if (await isRateLimited(request, `gallery-unlock:${token}`, 15, 10 * 60 * 1000)) {
     return NextResponse.redirect(new URL(`/g/${token}?error=rate-limited`, request.url), 303);
   }
   const album = await getAlbumByToken(token);
@@ -13,8 +13,11 @@ export async function POST(request: Request, context: { params: Promise<{ token:
   const form = await request.formData();
   const username = String(form.get("username") ?? "");
   const password = String(form.get("password") ?? "");
-  const valid = username === album.guest_username &&
-    (await hashGuestPassword(album.id, password)) === album.guest_password_hash;
+  const [validUsername, validPassword] = await Promise.all([
+    secureEqual(username, album.guest_username),
+    hashGuestPassword(album.id, password).then((hash) => secureEqual(hash, album.guest_password_hash)),
+  ]);
+  const valid = validUsername && validPassword;
   if (!valid) return NextResponse.redirect(new URL(`/g/${token}?error=invalid`, request.url), 303);
 
   const response = NextResponse.redirect(new URL(`/g/${token}`, request.url), 303);

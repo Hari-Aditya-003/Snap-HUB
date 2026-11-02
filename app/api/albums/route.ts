@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     title?: string; eventType?: string; eventDate?: string; expectedGuests?: number;
     location?: string; tagline?: string;
   };
-  const title = body.title?.trim();
+  const title = body.title?.trim().slice(0, 180);
   if (!title) return NextResponse.json({ error: "Gallery name is required" }, { status: 400 });
 
   const id = crypto.randomUUID();
@@ -51,8 +51,8 @@ export async function POST(request: Request) {
   const guestPassword = randomCode(8);
   const passwordHash = await hashGuestPassword(id, guestPassword);
   const createdAt = Date.now();
-  const eventType = body.eventType?.trim() || "Celebration";
-  const eventDate = body.eventDate?.trim() || "";
+  const eventType = body.eventType?.trim().slice(0, 80) || "Celebration";
+  const eventDate = body.eventDate?.trim().slice(0, 32) || "";
   const location = body.location?.trim().slice(0, 160) || "";
   const tagline = body.tagline?.trim().slice(0, 160) || "";
   const expectedGuests = Math.max(0, Math.min(100000, Number(body.expectedGuests) || 0));

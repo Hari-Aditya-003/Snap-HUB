@@ -68,7 +68,10 @@ Useful checks:
 ```bash
 npm run lint
 npm run build
+npm audit --omit=dev
 ```
+
+For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions repeats the dependency audit, lint, and production build on every push and pull request, while Dependabot monitors npm updates weekly.
 
 Database migrations live in `drizzle/`. The Sites build workflow applies production migrations during deployment.
 
