@@ -9,7 +9,18 @@ function check(condition: unknown, message: string): asserts condition {
 }
 
 async function localCredentials() {
-  const source = await readFile(new URL("../.env", import.meta.url), "utf8");
+  let source: string | undefined;
+  let sourceName = ".dev.vars";
+  for (const candidate of ["../.dev.vars", "../.env"]) {
+    try {
+      source = await readFile(new URL(candidate, import.meta.url), "utf8");
+      sourceName = candidate.slice(3);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (!source) throw new Error("Local admin credentials are missing from .dev.vars or .env");
   const values = new Map<string, string>();
   for (const line of source.split(/\r?\n/u)) {
     const match = line.match(/^([A-Z0-9_]+)=(.*)$/u);
@@ -17,7 +28,7 @@ async function localCredentials() {
   }
   const username = values.get("ADMIN_USERNAME");
   const password = values.get("ADMIN_PASSWORD");
-  if (!username || !password) throw new Error("Local admin credentials are missing from .env");
+  if (!username || !password) throw new Error(`Local admin credentials are missing from ${sourceName}`);
   return { username, password };
 }
 
