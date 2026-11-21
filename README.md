@@ -3,10 +3,17 @@
 [![GitHub stars](https://img.shields.io/github/stars/Hari-Aditya-003/Snap-HUB?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/Hari-Aditya-003/Snap-HUB?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/forks)
 [![Default branch](https://img.shields.io/badge/branch-main-2563eb?style=flat-square)](https://github.com/Hari-Aditya-003/Snap-HUB/tree/main)
+[![MIT license](https://img.shields.io/github/license/Hari-Aditya-003/Snap-HUB?style=flat-square)](LICENSE)
 
 Snap HUB is a private event photo and video sharing platform. A host creates an event, uploads and moderates memories, then shares one QR code. Guests open the gallery in a browser, so they do not need to install an app.
 
 The project is currently in testing stage. Purchases and paid plans are intentionally disabled.
+
+## Contribute
+
+Help improve the guest gallery, host dashboard, self-hosted setup, or SwiftUI app. Start with a [good first issue](https://github.com/Hari-Aditya-003/Snap-HUB/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or look through the [roadmap and open issues](https://github.com/Hari-Aditya-003/Snap-HUB/issues). If you want to work on an issue, leave a comment with your approach so others can coordinate with you.
+
+Use [GitHub Discussions](https://github.com/Hari-Aditya-003/Snap-HUB/discussions) for setup questions and early ideas. See the [contribution guide](CONTRIBUTING.md) for setup and verification, and the [security policy](SECURITY.md) for private reports.
 
 ## Standalone deployment
 
@@ -70,7 +77,7 @@ npm run db:migrate:local
 npm run dev
 ```
 
-Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.dev.vars`. Add a Google OAuth web client as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`; its authorized redirect URI is `<site-origin>/api/admin/google-drive/callback`. The development server starts on <http://127.0.0.1:5173>.
+Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.dev.vars`. The development server starts on <http://127.0.0.1:5173>. You can open the homepage, sign in at `/admin`, and run the automated checks with local D1 and no Cloudflare or Google account. Creating events and uploading media require connecting your own [Google Drive OAuth client](docs/DEPLOYMENT.md#google-drive-setup).
 
 Useful checks:
 
@@ -107,10 +114,11 @@ The app loads the host workspace at the configured origin, keeps the authenticat
 
 Run `npm run deploy` after configuring your own Cloudflare account, D1 database, and runtime secrets. The command builds the Worker, applies remote D1 migrations, and deploys `dist/server/wrangler.json`. Google Drive uploads require a Google OAuth web client and the callback URI for the deployed origin. Follow the [complete deployment guide](docs/DEPLOYMENT.md).
 
-## Documentation and contributions
+## Further reading
 
 - [Deployment and operation](docs/DEPLOYMENT.md)
-- [Contributing](CONTRIBUTING.md): setup, checks, issue reports, and pull requests
-- [Branches](https://github.com/Hari-Aditya-003/Snap-HUB/branches): `main` is the default branch; use a focused branch for each change.
+- [Community code of conduct](CODE_OF_CONDUCT.md)
 
-If this project helps you, consider starring it. Fork it to propose improvements, then open a pull request against `main`. The stars and forks badges above update from GitHub; they are not fixed counts.
+## License
+
+Project-owned software and documentation are available under the [MIT License](LICENSE). The [asset and third-party notices](NOTICE.md) identify material with separate terms, including the Snap HUB branding and bundled audio.

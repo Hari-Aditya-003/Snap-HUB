@@ -2,6 +2,7 @@
 name: Bug report
 about: Report a reproducible problem
 title: ""
+labels: bug
 ---
 
 ## What happened?
@@ -17,8 +18,8 @@ Describe the observed behavior and what you expected instead.
 
 ## Environment
 
-OS, runtime/tool versions, and relevant browser, device, GPU, or robot hardware:
+Include the browser and device, or the Node.js and Wrangler versions for a self-hosted setup. For iOS, include the Xcode version and iOS version.
 
 ## Evidence
 
-Sanitized logs, screenshots, or a minimal input. Remove credentials, private media, and personal data. For hardware or model results, distinguish simulation from measured output.
+Attach sanitized logs, screenshots, or a minimal example using synthetic media. Remove credentials, private gallery links, and personal data. Use [private reporting](https://github.com/Hari-Aditya-003/Snap-HUB/security/advisories/new) for vulnerabilities.

@@ -1,10 +1,10 @@
 # Contributing
 
-Contributions to Snap-HUB are welcome: clearer documentation, reproducible bug reports, focused fixes, and tested improvements.
+Snap HUB welcomes documentation improvements, reproducible bug reports, focused fixes, and tested improvements. Follow the [code of conduct](CODE_OF_CONDUCT.md) when participating.
 
 ## Before starting
 
-Read the [README](README.md), search existing issues and pull requests, and open an issue for a substantial feature or change in project direction. For small documentation fixes, a focused pull request is enough.
+Read the [README](README.md) and check the [open issues](https://github.com/Hari-Aditya-003/Snap-HUB/issues) and pull requests. If you are new to the project, look for [good first issues](https://github.com/Hari-Aditya-003/Snap-HUB/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and comment on the one you would like to take. Discuss substantial changes in an existing issue or [GitHub Discussions](https://github.com/Hari-Aditya-003/Snap-HUB/discussions). A focused pull request is enough for a small documentation fix.
 
 ## Fork and branch
 
@@ -18,19 +18,21 @@ git fetch upstream
 git switch -c docs/describe-your-change upstream/main
 ```
 
-Use descriptive branch names such as `docs/setup-guide`, `fix/import-error`, or `feat/short-description`. Target pull requests at `main`. A fork is your copy of the repository; a branch groups one change inside a repository. Stars express interest and do not grant write access.
+Use a descriptive branch name such as `docs/setup-guide` or `fix/gallery-upload`. Target pull requests at `main`.
 
 ## Setup and checks
 
-Follow the [development and deployment guide](docs/DEPLOYMENT.md). From the repository root:
+Follow the [local setup](README.md#local-web-development) to run the web app. From the repository root:
 
 ```bash
 npm ci
 npm run lint
-npm run build
+npm test
 ```
 
-Run `npm test` for the standalone Worker integration suite and describe manual checks for affected host/guest flows. Schema changes must include generated, reviewed Drizzle migrations. Use your own OAuth project and development data; use your own Worker, Cloudflare account, and D1 database for a fork.
+`npm test` builds the Worker and runs its integration suite with a temporary local D1 database. Describe manual checks for affected host and guest flows. For iOS changes, include the Xcode version, device or simulator, and iOS version you checked. Schema changes must include generated, reviewed Drizzle migrations.
+
+Use synthetic event media and your own OAuth test project for Drive checks. Follow the [deployment guide](docs/DEPLOYMENT.md) to set up a separate Worker and D1 database for a fork.
 
 ## Submit a pull request
 
@@ -46,8 +48,8 @@ Open a pull request from your branch to this repository's `main`. Complete the P
 
 ## Report a bug or request a feature
 
-Use the issue templates. Include the source commit, environment, steps to reproduce, expected result, observed result, and relevant sanitized logs. For a feature, describe the user problem, a proposed outcome, and alternatives.
+Use the [issue templates](https://github.com/Hari-Aditya-003/Snap-HUB/issues/new/choose). For a bug, include the source commit, environment, steps to reproduce, expected result, observed result, and relevant sanitized logs. For a feature, describe the user problem and a verifiable outcome. Send vulnerabilities through the [private reporting channel](SECURITY.md).
 
 ## Licensing
 
-This repository currently has no root license file. Public visibility does not by itself grant a reusable software license. Do not add a license or claim one on the maintainer's behalf; discuss licensing with the owner if your use requires an explicit grant.
+Contributions to project-owned software and documentation are accepted under the [MIT License](LICENSE). Credit third-party material you include and retain its license and attribution. See the [notices](NOTICE.md) for existing exceptions.
