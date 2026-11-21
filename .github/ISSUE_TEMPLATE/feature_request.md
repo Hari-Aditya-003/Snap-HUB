@@ -2,6 +2,7 @@
 name: Feature request
 about: Propose an improvement with a clear use case
 title: ""
+labels: enhancement
 ---
 
 ## User problem
