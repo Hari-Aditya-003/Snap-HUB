@@ -57,8 +57,8 @@ Hosts and guests share the same validation rules: each file is checked by MIME t
 - **Per-file limit:** 75 MB.
 - **Per submission:** up to 20 files, and the whole batch must stay under 100 MB.
 - iPhone formats such as HEIC and MOV are accepted for upload. Successful upload does not guarantee in-browser playback — most browsers cannot display HEIC images, and MOV files may use codecs the browser cannot decode. MP4/H.264 has the broadest playback support.
-- Files in a batch that fail type, signature, or size checks are skipped; the accepted files still upload.
-- Guest uploads additionally require the event to be live with guest uploads enabled, and are rate-limited to 8 submissions per 10 minutes per event.
+- A batch over the 20-file or 100 MB limits is rejected entirely. Within an accepted batch, files that fail type, signature, or size checks are skipped; the rest still upload.
+- Guest uploads additionally require the event to be live with guest uploads enabled, and are rate-limited to 8 submissions per 10 minutes per guest IP per event — rejected requests also consume that quota.
 
 ## Architecture
 
