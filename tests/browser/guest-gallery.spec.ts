@@ -12,9 +12,10 @@ const ALBUM_ID = "browser-smoke-event";
 const GUEST_TOKEN = "browser-smoke-token";
 
 // A live link-access event with manual moderation, guest uploads enabled, and
-// two approved host photos. The drive_* columns are pre-populated so the album
-// behaves like an event that was already connected to Drive; with
-// SNAP_HUB_FAKE_DRIVE=1 set by the helper, no Google traffic ever happens.
+// three approved host items covering PNG, JPEG, and MP4 media types. The
+// drive_* columns are pre-populated so the album behaves like an event that
+// was already connected to Drive; with SNAP_HUB_FAKE_DRIVE=1 set by the
+// helper, no Google traffic ever happens.
 const SEED_SQL = `
 INSERT INTO albums (id, title, event_type, event_date, description, tagline, location, theme,
   expected_guests, status, access_mode, allow_guest_uploads, moderation_mode, downloads_enabled,
@@ -29,8 +30,10 @@ INSERT INTO photos (id, album_id, object_key, filename, content_type, caption, i
   collection_id, moderation_status, uploader_name, source, size, created_at) VALUES
   ('browser-photo-1', '${ALBUM_ID}', 'fake-drive-browser-photo-1', 'first-dance.png', 'image/png',
    'First dance', 0, NULL, 'approved', 'Host', 'host', ${PNG_BYTES.byteLength}, 1700000002000),
-  ('browser-photo-2', '${ALBUM_ID}', 'fake-drive-browser-photo-2', 'cake-cutting.png', 'image/png',
-   'Cake cutting', 1, NULL, 'approved', 'Host', 'host', ${PNG_BYTES.byteLength}, 1700000001000);
+  ('browser-photo-2', '${ALBUM_ID}', 'fake-drive-browser-photo-2', 'cake-cutting.jpg', 'image/jpeg',
+   'Cake cutting', 1, NULL, 'approved', 'Host', 'host', 223, 1700000001000),
+  ('browser-photo-3', '${ALBUM_ID}', 'fake-drive-browser-photo-3', 'highlight-clip.mp4', 'video/mp4',
+   'Highlight clip', 0, NULL, 'approved', 'Host', 'host', 1979, 1700000000000);
 `;
 
 let worker: LocalWorker;
@@ -53,21 +56,49 @@ test("guest opens the event link, browses media, and opens and closes the viewer
   await page.goto(galleryUrl());
 
   await expect(page.getByRole("heading", { name: "Browser smoke event" })).toBeVisible();
-  await expect(page.getByText("2 memories")).toBeVisible();
+  await expect(page.getByText("3 memories")).toBeVisible();
   const cards = page.locator(".memory-card");
-  await expect(cards).toHaveCount(2);
-  // Thumbnails stream through the fake Drive adapter — never Google.
-  await expect(cards.first().locator("img")).toBeVisible();
+  await expect(cards).toHaveCount(3);
+  // Thumbnails stream through the fake Drive adapter — never Google — and the
+  // bytes actually decode in the browser.
+  for (const image of [cards.nth(0).locator("img"), cards.nth(1).locator("img")]) {
+    await expect(image).toBeVisible();
+    await expect
+      .poll(async () => image.evaluate((element) => element instanceof HTMLImageElement
+        && element.complete && element.naturalWidth > 0))
+      .toBe(true);
+  }
 
   await cards.first().getByRole("button", { name: "Open first-dance.png" }).click();
   const viewer = page.getByRole("dialog", { name: "Memory viewer" });
   await expect(viewer).toBeVisible();
   await expect(viewer.locator(".slide-info")).toContainText("First dance");
-  await expect(viewer.locator(".slide-info")).toContainText("1 of 2");
+  await expect(viewer.locator(".slide-info")).toContainText("1 of 3");
+  await expect
+    .poll(async () => viewer.locator(".slide-stage img")
+      .evaluate((element) => element instanceof HTMLImageElement && element.complete && element.naturalWidth > 0))
+    .toBe(true);
 
   await viewer.getByRole("button", { name: "Next memory" }).click();
   await expect(viewer.locator(".slide-info")).toContainText("Cake cutting");
-  await expect(viewer.locator(".slide-info")).toContainText("2 of 2");
+  await expect(viewer.locator(".slide-info")).toContainText("2 of 3");
+
+  // The fake adapter serves a genuinely playable MP4 for video entries and
+  // honours byte-range requests the way Drive does.
+  await viewer.getByRole("button", { name: "Next memory" }).click();
+  await expect(viewer.locator(".slide-info")).toContainText("Highlight clip");
+  await expect(viewer.locator(".slide-info")).toContainText("3 of 3");
+  const clip = viewer.locator(".slide-stage video");
+  await expect(clip).toBeVisible();
+  await expect
+    .poll(async () => clip.evaluate((element) => element instanceof HTMLVideoElement && element.readyState >= 1))
+    .toBe(true);
+
+  const ranged = await page.request.get(`${worker.origin}/api/gallery/${GUEST_TOKEN}/photos/browser-photo-3`, {
+    headers: { Range: "bytes=0-99" },
+  });
+  expect(ranged.status()).toBe(206);
+  expect(ranged.headers()["content-range"]).toBe("bytes 0-99/1979");
 
   await viewer.getByRole("button", { name: "Close viewer" }).click();
   await expect(viewer).toBeHidden();
@@ -76,7 +107,8 @@ test("guest opens the event link, browses media, and opens and closes the viewer
 test("pending guest upload appears in the gallery only after host approval", async ({ page }) => {
   await page.goto(galleryUrl());
   const cards = page.locator(".memory-card");
-  await expect(cards).toHaveCount(2);
+  const pendingCard = page.locator(".memory-card", { hasText: "Disposable upload" });
+  await expect(cards).toHaveCount(3);
 
   await page.getByRole("button", { name: "Add memories" }).click();
   const panel = page.locator(".guest-upload-panel");
@@ -99,8 +131,11 @@ test("pending guest upload appears in the gallery only after host approval", asy
   expect(uploaded.moderationStatus).toBe("pending");
   expect(uploaded.photos).toHaveLength(1);
   await expect(page.getByText("Uploaded — the host will approve these memories")).toBeVisible();
-  // Manual moderation keeps the pending upload hidden from other guests.
-  await expect(cards).toHaveCount(2);
+  // Manual moderation keeps the pending upload hidden — including on a fresh
+  // server render, not just in the client-side list state.
+  await page.reload();
+  await expect(cards).toHaveCount(3);
+  await expect(pendingCard).toHaveCount(0);
 
   // The host approves through the same PATCH endpoint the dashboard calls.
   const login = await page.request.post(`${worker.origin}/api/admin/login`, {
@@ -114,10 +149,9 @@ test("pending guest upload appears in the gallery only after host approval", asy
   expect(approve.ok()).toBeTruthy();
 
   await page.reload();
-  await expect(cards).toHaveCount(3);
-  const approvedCard = page.locator(".memory-card", { hasText: "Disposable upload" });
-  await expect(approvedCard).toBeVisible();
-  await approvedCard.getByRole("button", { name: "Open guest-upload.png" }).click();
+  await expect(cards).toHaveCount(4);
+  await expect(pendingCard).toBeVisible();
+  await pendingCard.getByRole("button", { name: "Open guest-upload.png" }).click();
   const viewer = page.getByRole("dialog", { name: "Memory viewer" });
   await expect(viewer).toBeVisible();
   await expect(viewer.locator(".slide-info")).toContainText("Disposable upload");

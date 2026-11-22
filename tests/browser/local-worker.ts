@@ -43,25 +43,35 @@ export async function startLocalWorker(options: LocalWorkerOptions = {}): Promis
       const stopped = new Promise((done) => server!.once("exit", done));
       if (process.platform === "win32") {
         // `wrangler dev` spawns workerd.exe children that keep D1 sqlite files
-        // locked. SIGTERM on Windows only reaches the node process, so kill
-        // the whole tree before removing the state directory.
-        spawnSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore" });
+        // locked. SIGTERM on Windows only reaches the node process, so stop
+        // the whole tree.
+        spawnSync("taskkill", ["/pid", String(server.pid), "/t"], { stdio: "ignore" });
       } else {
         process.kill(-server.pid, "SIGTERM");
       }
-      await Promise.race([stopped, delay(15_000)]);
+      const exited = await Promise.race([stopped.then(() => true), delay(15_000).then(() => false)]);
+      if (!exited && server.exitCode === null) {
+        // The graceful stop did not take — force-kill the remaining tree and
+        // fail loudly if even that does not work.
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore" });
+        else process.kill(-server.pid, "SIGKILL");
+        await Promise.race([stopped, delay(10_000)]);
+        assert.ok(server.exitCode !== null, "Local Worker did not exit after force-kill");
+      }
     }
-    // File locks can outlive the process briefly on Windows; retry and never
-    // let cleanup failure hide the real test result.
+    // File locks can outlive the process briefly on Windows; retry, then
+    // surface the cleanup failure instead of silently leaving state behind.
+    let lastError: unknown;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         rmSync(state, { recursive: true, force: true });
         return;
-      } catch {
+      } catch (error) {
+        lastError = error;
         await delay(500);
       }
     }
-    console.warn(`Could not remove temporary state directory ${state}; leaving it behind.`);
+    throw new Error(`Could not remove temporary state directory ${state}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   };
 
   try {
@@ -126,7 +136,8 @@ export async function startLocalWorker(options: LocalWorkerOptions = {}): Promis
     }
     throw new Error(`Local Worker did not become ready within 90 seconds:\n${startup}`);
   } catch (error) {
-    await stop();
+    // A failed teardown must never mask the original startup error.
+    await stop().catch(() => undefined);
     throw error;
   }
 }

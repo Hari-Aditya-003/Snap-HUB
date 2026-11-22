@@ -61,7 +61,7 @@ export async function POST(request: Request) {
   const collectionId = crypto.randomUUID();
   let driveFolders;
   try {
-    driveFolders = await createEventDriveFolders(id, title);
+    driveFolders = await createEventDriveFolders(id, title, request);
   } catch (error) {
     const message = error instanceof GoogleDriveError ? error.message : "Could not create this event in Google Drive.";
     return NextResponse.json({ error: message }, { status: error instanceof GoogleDriveError ? error.status : 502 });
@@ -89,7 +89,7 @@ export async function POST(request: Request) {
       ).bind(id),
     ]);
   } catch {
-    await deleteDriveFile(driveFolders.eventFolderId).catch(() => undefined);
+    await deleteDriveFile(driveFolders.eventFolderId, request).catch(() => undefined);
     return NextResponse.json({ error: "The Google Drive folder was created, but the event could not be saved." }, { status: 500 });
   }
 
