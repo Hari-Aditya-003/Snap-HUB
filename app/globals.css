@@ -148,6 +148,9 @@ img, video { max-width: 100%; }
 .share-details strong { font-size: .78rem; }
 .share-details svg { grid-column: 2; grid-row: 1/3; align-self: center; width: .95rem; color: var(--rose); }
 .share-details .password-row { border-color: #ffbfdc; background: #fff1f7; }
+.copy-fallback { margin-top: .6rem; padding: .6rem .68rem; display: grid; gap: .35rem; border: 1px solid #f3c4d8; border-radius: .72rem; background: #fff1f7; }
+.copy-fallback small { color: #a08398; font-size: .66rem; text-transform: uppercase; letter-spacing: .06em; }
+.copy-fallback input { width: 100%; min-height: 2.15rem; padding: 0 .6rem; border: 1px solid #ead3e1; border-radius: .58rem; color: var(--ink); background: #fffafd; font-size: .75rem; outline: none; }
 .card-actions { margin-top: .75rem; display: flex; flex-wrap: wrap; gap: .5rem; }
 .card-actions a,.card-actions button { padding: .58rem .7rem; display: inline-flex; align-items: center; gap: .4rem; border: 1px solid #edd5e3; border-radius: .68rem; color: #744f6b; background: #fff; font-size: .75rem; font-weight: 700; cursor: pointer; }
 .card-actions button:disabled { opacity: .55; cursor: wait; }

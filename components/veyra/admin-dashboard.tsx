@@ -65,6 +65,7 @@ export function AdminDashboard() {
   const [busy, setBusy] = useState(false);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null });
+  const [copyFallback, setCopyFallback] = useState<{ label: string; value: string } | null>(null);
 
   const selected = albums.find((album) => album.id === selectedId) ?? albums[0];
   const selectedMedia = useMemo(() => media.filter((item) => item.album_id === selected?.id), [media, selected]);
@@ -150,6 +151,9 @@ export function AdminDashboard() {
     }
     void QRCode.toDataURL(qrTarget, { width: 360, margin: 1, color: { dark: "#5a1749", light: "#fff8fc" } }).then(setQrDataUrl);
   }, [qrTarget]);
+  useEffect(() => {
+    void Promise.resolve().then(() => setCopyFallback(null));
+  }, [qrTarget, selected?.id]);
 
   async function createAlbum(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true);
@@ -246,7 +250,17 @@ export function AdminDashboard() {
     if (!selected) return;
     setAlbums((current) => current.map((album) => album.id === selected.id ? { ...album, ...patch } : album));
   }
-  function copy(value: string, label: string) { void navigator.clipboard.writeText(value); toast.success(`${label} copied`); }
+  async function copy(value: string, label: string) {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(value);
+      setCopyFallback(null);
+      toast.success(`${label} copied`);
+    } catch {
+      setCopyFallback({ label, value });
+      toast.error(`Couldn’t copy the ${label.toLowerCase()} — select and copy it manually below.`);
+    }
+  }
 
   return (
     <>
@@ -295,7 +309,8 @@ export function AdminDashboard() {
           {selected && <section className="hub-card qr-card">
             <div className="hub-card-title"><span><QrCode /></span><div><h2>Share &amp; QR centre</h2><p>Make a QR for the gallery, guest uploads, or the live screen.</p></div></div>
             <div className="qr-tabs"><button className={qrMode === "gallery" ? "active" : ""} onClick={() => setQrMode("gallery")}>Gallery</button><button className={qrMode === "upload" ? "active" : ""} onClick={() => setQrMode("upload")}>Upload</button><button className={qrMode === "slideshow" ? "active" : ""} onClick={() => setQrMode("slideshow")}>Slideshow</button></div>
-            <div className="qr-share-layout">{qrDataUrl && <div className="qr-box"><img src={qrDataUrl} alt={`QR code for ${selected.title}`} /></div>}<div className="share-details"><button onClick={() => copy(qrTarget, "Share link")}><small>{qrMode} link</small><strong>{qrTarget}</strong><Copy /></button>{selected.access_mode === "password" && <button onClick={() => copy(selected.guest_username, "Guest ID")}><small>Guest ID</small><strong>{selected.guest_username}</strong><Copy /></button>}{selected.guest_password && <button className="password-row" onClick={() => copy(selected.guest_password!, "Password")}><small>New password · save now</small><strong>{selected.guest_password}</strong><Copy /></button>}</div></div>
+            <div className="qr-share-layout">{qrDataUrl && <div className="qr-box"><img src={qrDataUrl} alt={`QR code for ${selected.title}`} /></div>}<div className="share-details"><button onClick={() => void copy(qrTarget, "Share link")}><small>{qrMode} link</small><strong>{qrTarget}</strong><Copy /></button>{selected.access_mode === "password" && <button onClick={() => void copy(selected.guest_username, "Guest ID")}><small>Guest ID</small><strong>{selected.guest_username}</strong><Copy /></button>}{selected.guest_password && <button className="password-row" onClick={() => void copy(selected.guest_password!, "Password")}><small>New password · save now</small><strong>{selected.guest_password}</strong><Copy /></button>}</div></div>
+            {copyFallback && <div className="copy-fallback"><small>Clipboard blocked — select and copy the {copyFallback.label.toLowerCase()} manually</small><input readOnly value={copyFallback.value} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} aria-label={`${copyFallback.label} — select and copy manually`} /></div>}
             <div className="card-actions"><a href={qrTarget} target="_blank" rel="noreferrer"><ExternalLink /> Open {qrMode}</a>{qrDataUrl && <a href={qrDataUrl} download={`${selected.event_slug ?? "snap-hub"}-${qrMode}-qr.png`}><Download /> Download QR</a>}{selected.access_mode === "password" && <button onClick={() => void rotateGuestCredentials()} disabled={busy}><KeyRound /> New guest login</button>}</div>
             {selected.status !== "live" && <div className="draft-warning"><Clock3 /> Guests see a waiting screen until this event is published.</div>}
           </section>}
