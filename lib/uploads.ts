@@ -17,6 +17,28 @@ function ascii(bytes: Uint8Array, start: number, length: number) {
   return String.fromCharCode(...bytes.slice(start, start + length));
 }
 
+export const MAX_MEDIA_FILE_SIZE = 75 * 1024 * 1024;
+
+export type MediaRejection = { filename: string; reason: string };
+
+export async function checkMediaFile(file: File): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (file.size > MAX_MEDIA_FILE_SIZE) return { ok: false, reason: "over 75 MB" };
+  if (!isAllowedMedia(file)) return { ok: false, reason: "unsupported file type" };
+  if (!(await hasValidMediaSignature(file))) return { ok: false, reason: "unrecognized file contents" };
+  return { ok: true };
+}
+
+export async function splitMediaFiles(files: File[]): Promise<{ accepted: File[]; rejected: MediaRejection[] }> {
+  const accepted: File[] = [];
+  const rejected: MediaRejection[] = [];
+  for (const file of files) {
+    const check = await checkMediaFile(file);
+    if (check.ok) accepted.push(file);
+    else rejected.push({ filename: file.name, reason: check.reason });
+  }
+  return { accepted, rejected };
+}
+
 export async function hasValidMediaSignature(file: File) {
   if (!isAllowedMedia(file)) return false;
   const bytes = new Uint8Array(await file.slice(0, 32).arrayBuffer());

@@ -25,6 +25,19 @@ type GalleryViewProps = {
 
 type Filter = "all" | "photos" | "videos" | "highlights" | "favorites";
 
+type UploadPhotoResult = { id: string; filename: string; size?: number; moderationStatus?: string };
+type UploadResult = {
+  photos?: UploadPhotoResult[];
+  rejected?: Array<{ filename: string; reason: string }>;
+  moderationStatus?: string;
+  error?: string;
+};
+
+function describeRejected(rejected: Array<{ filename: string; reason: string }>) {
+  const shown = rejected.slice(0, 3).map((item) => `${item.filename} (${item.reason})`).join(", ");
+  return rejected.length > 3 ? `${shown} +${rejected.length - 3} more` : shown;
+}
+
 export function GalleryView({ album, token, media: initialMedia, collections }: GalleryViewProps) {
   const [media, setMedia] = useState(initialMedia);
   const [filter, setFilter] = useState<Filter>("all");
@@ -34,6 +47,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [savedUploads, setSavedUploads] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const stored = window.localStorage.getItem(`snap-hub-favorites:${token}`);
@@ -69,21 +83,76 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const data = await response.json() as { media: GalleryMedia[] };
     setMedia(data.media);
   }
+  function rememberSaved(photos?: UploadPhotoResult[]) {
+    if (!photos?.length) return;
+    setSavedUploads((current) => {
+      const next = new Set(current);
+      for (const photo of photos) next.add(`${photo.filename}:${photo.size ?? ""}`);
+      return next;
+    });
+  }
+  function closeUploadPanel() {
+    setUploadOpen(false);
+    setSavedUploads(new Set());
+  }
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
-    setUploading(true);
-    const response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body: new FormData(form) });
-    const data = await response.json();
-    setUploading(false);
-    if (!response.ok) return toast.error(data.error ?? "Upload failed");
-    form.reset();
-    if (data.moderationStatus === "approved") {
-      await refreshMedia();
-      toast.success("Your memories are now in the gallery");
-    } else {
-      toast.success("Uploaded — the host will approve these memories");
+    const body = new FormData(form);
+    const picker = form.querySelector<HTMLInputElement>('input[name="photos"]');
+    const selected = picker?.files ? [...picker.files] : [];
+    const filesToSend = selected.filter((file) => !savedUploads.has(`${file.name}:${file.size}`));
+    const alreadySaved = selected.length - filesToSend.length;
+    if (alreadySaved) {
+      body.delete("photos");
+      for (const file of filesToSend) body.append("photos", file);
     }
+    if (!filesToSend.length) {
+      toast.info(alreadySaved
+        ? "Those memories are already saved — choose different files or close this panel"
+        : "Choose at least one photo or video");
+      return;
+    }
+    if (alreadySaved) {
+      toast.info(`${alreadySaved} already saved — sending only the remaining ${filesToSend.length}`);
+    }
+
+    setUploading(true);
+    let response: Response | null = null;
+    let data: UploadResult | null = null;
+    try {
+      response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body });
+      data = await response.json().catch(() => null) as UploadResult | null;
+    } catch {
+      toast.error("The upload did not reach the server — check your connection and try again. Your selections are kept.");
+    } finally {
+      setUploading(false);
+    }
+    if (!response) return;
+
+    const rejected = data?.rejected ?? [];
+    const savedCount = data?.photos?.length ?? 0;
+    rememberSaved(data?.photos);
+
+    if (!response.ok) {
+      const detail = describeRejected(rejected);
+      toast.error(`${data?.error ?? "Upload failed — please try again"}${detail ? ` — ${detail}` : ""}`);
+      if (savedCount) {
+        toast.info(`${savedCount} ${savedCount === 1 ? "memory was" : "memories were"} saved before the error — they will be skipped if you send again`);
+      }
+      return;
+    }
+
+    if (data?.moderationStatus === "approved") await refreshMedia().catch(() => undefined);
+
+    if (rejected.length) {
+      toast.warning(`${savedCount} ${savedCount === 1 ? "memory" : "memories"} saved — ${describeRejected(rejected)}. Fix those files and send again.`);
+      return;
+    }
+
+    form.reset();
+    setSavedUploads(new Set());
+    toast.success(data?.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
     setUploadOpen(false);
   }
 
@@ -110,7 +179,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       </section>
 
       {uploadOpen && album.allowGuestUploads && <section className="guest-upload-panel">
-        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={() => setUploadOpen(false)} aria-label="Close upload"><X /></button></div>
+        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={closeUploadPanel} aria-label="Close upload"><X /></button></div>
         <form onSubmit={upload}>
           <label>Your name<input name="uploaderName" maxLength={80} placeholder="How should the host know you?" /></label>
           <label>Caption<input name="caption" maxLength={240} placeholder="A short memory or message" /></label>
