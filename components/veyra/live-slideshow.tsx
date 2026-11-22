@@ -17,38 +17,41 @@ export function LiveSlideshow({ title, token, initialMedia, initialControl }: { 
   const [musicBlocked, setMusicBlocked] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const mediaRef = useRef(initialMedia);
+  const controlRef = useRef(initialControl);
   const playing = remoteControl.playing && !localPaused;
 
   useEffect(() => { mediaRef.current = media; }, [media]);
+  useEffect(() => { controlRef.current = remoteControl; }, [remoteControl]);
 
   useEffect(() => {
     let active = true;
-    let inFlight = false;
+    let inFlight: AbortController | null = null;
     const refresh = async () => {
       if (inFlight) return;
-      inFlight = true;
+      const controller = new AbortController();
+      inFlight = controller;
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       try {
-        const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
+        const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store", signal: controller.signal });
         if (!response.ok) throw new Error(`Slideshow refresh failed with ${response.status}`);
         const data = await response.json() as { media: SlideMedia[]; slideshow: SlideshowControl };
         if (!active) return;
         setConnection("connected");
-        setRemoteControl((current) => {
-          const hostMoved = data.slideshow.updatedAt !== current.updatedAt;
-          setIndex((value) => {
-            if (!data.media.length) return 0;
-            if (hostMoved) return Math.min(data.slideshow.position, data.media.length - 1);
-            const currentId = mediaRef.current[value]?.id;
-            const preserved = currentId ? data.media.findIndex((item) => item.id === currentId) : -1;
-            return preserved >= 0 ? preserved : Math.min(value, data.media.length - 1);
-          });
-          return data.slideshow;
-        });
+        const hostMoved = data.slideshow.updatedAt !== controlRef.current.updatedAt;
+        setRemoteControl(data.slideshow);
         setMedia(data.media);
+        setIndex((value) => {
+          if (!data.media.length) return 0;
+          if (hostMoved) return Math.min(data.slideshow.position, data.media.length - 1);
+          const currentId = mediaRef.current[value]?.id;
+          const preserved = currentId ? data.media.findIndex((item) => item.id === currentId) : -1;
+          return preserved >= 0 ? preserved : Math.min(value, data.media.length - 1);
+        });
       } catch {
         if (active) setConnection("reconnecting");
       } finally {
-        inFlight = false;
+        window.clearTimeout(timeout);
+        if (inFlight === controller) inFlight = null;
       }
     };
     const onVisibilityChange = () => { if (document.visibilityState === "visible") void refresh(); };
@@ -57,6 +60,7 @@ export function LiveSlideshow({ title, token, initialMedia, initialControl }: { 
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       active = false;
+      inFlight?.abort();
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
