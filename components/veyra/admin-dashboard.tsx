@@ -38,8 +38,10 @@ type DriveStatus = {
   configured: boolean; connected: boolean; email: string | null;
   rootFolderId: string | null; rootFolderUrl: string | null;
   // "expired": stored grant is revoked/expired/undecryptable and must be
-  // reconnected. "unverified": the grant could not be checked right now.
-  reason: "expired" | "unverified" | null;
+  // reconnected. "misconfigured": Google rejected the Worker's OAuth client
+  // credentials — the host must fix them, reconnecting alone will not help.
+  // "unverified": the grant could not be checked right now.
+  reason: "expired" | "unverified" | "misconfigured" | null;
 };
 
 const GOOGLE_DRIVE_SETUP_GUIDE = "https://github.com/Hari-Aditya-003/Snap-HUB/blob/main/docs/DEPLOYMENT.md#google-drive-setup";
@@ -70,12 +72,26 @@ export function AdminDashboard() {
   const [busy, setBusy] = useState(false);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null, reason: null });
+  // Set when the host reconnects with a different Google account: albums keep
+  // folder IDs owned by the previous account's Drive, so existing media can go
+  // quiet until the original account is connected back. The OAuth callback
+  // communicates this through the `drive` query param.
+  const [driveAccountChanged] = useState(() =>
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("drive") === "connected-account-changed");
 
   const selected = albums.find((album) => album.id === selectedId) ?? albums[0];
   const selectedMedia = useMemo(() => media.filter((item) => item.album_id === selected?.id), [media, selected]);
   const selectedCollections = useMemo(() => collections.filter((item) => item.album_id === selected?.id), [collections, selected]);
   const pendingCount = selectedMedia.filter((item) => item.moderation_status === "pending").length;
   const driveNeedsReconnect = driveStatus.connected && driveStatus.reason === "expired";
+  const driveMisconfigured = driveStatus.connected && driveStatus.reason === "misconfigured";
+  // A blocked grant means Drive-backed actions (create event, upload) will
+  // fail at the API anyway — keep them disabled until the problem is fixed.
+  const driveBlocked = driveNeedsReconnect || driveMisconfigured;
+  const driveUsable = driveStatus.connected && !driveBlocked;
+  const driveActionHint = driveNeedsReconnect ? "Reconnect Google Drive first"
+    : driveMisconfigured ? "Fix the OAuth credentials first"
+    : "Connect Google Drive first";
   const totals = useMemo(() => ({
     media: albums.reduce((sum, album) => sum + Number(album.media_count), 0),
     storage: albums.reduce((sum, album) => sum + Number(album.storage_bytes), 0),
@@ -100,6 +116,9 @@ export function AdminDashboard() {
     const result = new URLSearchParams(window.location.search).get("drive");
     if (!result) return;
     if (result === "connected") toast.success("Google Drive connected — event folders are ready");
+    else if (result === "connected-account-changed") {
+      toast.warning("Drive reconnected with a different Google account — previously uploaded media may be inaccessible");
+    }
     else if (result === "cancelled") toast.error("Google Drive connection was cancelled");
     else if (result === "not-configured") toast.error("Google OAuth credentials still need to be configured");
     else toast.error("Google Drive could not be connected. Please try again.");
@@ -276,7 +295,7 @@ export function AdminDashboard() {
         </section>
 
         <div className="hub-content-grid">
-          <section className={`hub-card drive-connection-card ${driveNeedsReconnect ? "attention" : driveStatus.connected && driveStatus.configured ? "connected" : "needs-connection"}`}>
+          <section className={`hub-card drive-connection-card ${driveBlocked ? "attention" : driveStatus.connected && driveStatus.configured ? "connected" : "needs-connection"}`}>
             <div className="hub-card-title"><span><HardDrive /></span><div><h2>Google Drive</h2><p>All original photos and videos are stored only in your Drive.</p></div></div>
             {!driveStatus.configured ? <>
               <p className="drive-connection-copy">Snap HUB stores every original photo and video in the host&apos;s Google Drive, so the Google OAuth client must be configured on the Worker before anything can connect.</p>
@@ -286,9 +305,14 @@ export function AdminDashboard() {
               <div className="drive-connection-state expired"><span><TriangleAlert /> Reconnect needed</span><strong>{driveStatus.email}</strong></div>
               <p className="drive-connection-copy">Google Drive access for this account has expired or been revoked. Uploads, media playback, and new event folders will fail until Drive is connected again — reconnecting keeps every event, memory, and Drive folder exactly as it is.</p>
               <div className="card-actions"><a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a>{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Setup guide</a></div>
+            </> : driveMisconfigured ? <>
+              <div className="drive-connection-state expired"><span><TriangleAlert /> OAuth credentials problem</span><strong>{driveStatus.email}</strong></div>
+              <p className="drive-connection-copy">Google rejects the Worker&apos;s OAuth client settings, so Drive requests keep failing. Correct GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the Worker configuration — reconnecting only helps after the credentials are fixed.</p>
+              <div className="card-actions"><a className="drive-connect-button" href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> OAuth setup guide</a><a href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a></div>
             </> : driveStatus.connected ? <>
               <div className="drive-connection-state"><span><Check /> Connected</span><strong>{driveStatus.email}</strong></div>
               <div className="drive-folder-map"><span>Snap HUB</span><i>›</i><span>Event name</span><i>›</i><span>Photos · Videos · Guest Uploads · Highlights</span></div>
+              {driveAccountChanged && <div className="draft-warning"><TriangleAlert /> This connection was re-authorized with a different Google account. Media uploaded earlier still lives in the previous account&apos;s Drive and may no longer be reachable — reconnect the original account to restore it.</div>}
               {driveStatus.reason === "unverified" && <p className="drive-connection-note">Snap HUB could not confirm the connection just now — reconnect only if uploads start failing.</p>}
               <div className="card-actions">{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a></div>
             </> : <>
@@ -303,7 +327,7 @@ export function AdminDashboard() {
               <label>Event name<input name="title" required placeholder="e.g. Aditya’s 30th Birthday" /></label>
               <label>Type<select name="eventType">{eventTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
               <label>Short tagline<input name="tagline" placeholder="The beginning of forever" /></label>
-              <button disabled={busy || !driveStatus.connected}>{driveStatus.connected ? "Create draft event" : "Connect Google Drive first"}</button>
+              <button disabled={busy || !driveUsable}>{driveUsable ? "Create draft event" : driveActionHint}</button>
             </form>
           </section>
 
@@ -354,7 +378,7 @@ export function AdminDashboard() {
             <form onSubmit={upload} className="media-upload-form expanded-upload">
               <div className="upload-meta"><select name="collectionId">{selectedCollections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select><input name="caption" placeholder="Optional caption for this upload" /></div>
               <label><ImagePlus /><span><strong>Choose photos &amp; videos</strong><small>JPG, PNG, WebP, MP4 and MOV · up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required /></label>
-              <button disabled={busy || !driveStatus.connected}>{busy ? "Uploading…" : driveStatus.connected ? "Upload to Google Drive" : "Connect Google Drive first"}</button>
+              <button disabled={busy || !driveUsable}>{busy ? "Uploading…" : driveUsable ? "Upload to Google Drive" : driveActionHint}</button>
             </form>
             <form className="collection-form" onSubmit={createCollection}><input name="name" placeholder="New album name — e.g. Reception" required /><button><FolderPlus /> Add album</button></form>
             <div className="collection-chips">{selectedCollections.map((collection) => <span key={collection.id}>{collection.name}</span>)}</div>

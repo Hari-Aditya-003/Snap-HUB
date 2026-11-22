@@ -33,8 +33,8 @@ export async function GET(request: Request) {
   if (!code) return finish(request, "missing-code");
   try {
     const authorization = await exchangeGoogleOAuthCode(code, url.origin);
-    await saveGoogleDriveConnection(authorization.refreshToken, authorization.accessToken, authorization.email);
-    return finish(request, "connected");
+    const saved = await saveGoogleDriveConnection(authorization.refreshToken, authorization.accessToken, authorization.email);
+    return finish(request, saved.accountChanged ? "connected-account-changed" : "connected");
   } catch {
     return finish(request, "failed");
   }

@@ -3,16 +3,17 @@ import { test } from "node:test";
 
 // lib/google-drive-grant.ts is plain TypeScript without Worker bindings, so
 // `node --test` can import it directly. Node >= 22.18 strips type annotations
-// by default; on older 22.x runtimes the import fails and these checks report
-// as skipped instead of failing the suite.
-let checkDriveRefreshGrant;
-let createDriveGrantHealth;
-let failedGrantError;
+// by default; on older 22.x runtimes the import fails with
+// ERR_UNKNOWN_FILE_EXTENSION and these checks report as skipped instead of
+// failing the suite. Every other import failure — a syntax error, a broken
+// import inside the module — must surface as a test failure, not a skip.
+let grantModule;
 try {
-  ({ checkDriveRefreshGrant, createDriveGrantHealth, failedGrantError } = await import("../lib/google-drive-grant.ts"));
-} catch {
-  checkDriveRefreshGrant = undefined;
+  grantModule = await import("../lib/google-drive-grant.ts");
+} catch (error) {
+  if (error?.code !== "ERR_UNKNOWN_FILE_EXTENSION") throw error;
 }
+const { checkDriveRefreshGrant, createDriveGrantHealth, driveConnectionStatus, failedGrantError } = grantModule ?? {};
 const SKIP_REASON = "this Node runtime cannot import TypeScript directly";
 
 const OPTIONS = { clientId: "test-client-id", clientSecret: "test-client-secret", refreshToken: "test-refresh-token" };
@@ -46,12 +47,58 @@ test("invalid_grant maps to the expired reconnect state without leaking provider
   assert.equal(JSON.stringify(result).includes("revoked by the user"), false);
 });
 
-test("unauthorized_client also maps to expired", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
+test("unauthorized_client maps to misconfigured — the OAuth client, not the user grant, is the problem", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
   const result = await checkDriveRefreshGrant({
     ...OPTIONS,
     fetchImpl: async () => tokenResponse(400, { error: "unauthorized_client" }),
   });
-  assert.deepEqual(result, { outcome: "expired" });
+  assert.deepEqual(result, { outcome: "misconfigured" });
+});
+
+test("invalid_client maps to misconfigured — bad Worker credentials need fixing, not reconnecting", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
+  const result = await checkDriveRefreshGrant({
+    ...OPTIONS,
+    fetchImpl: async () => tokenResponse(401, { error: "invalid_client" }),
+  });
+  assert.deepEqual(result, { outcome: "misconfigured" });
+});
+
+test("a stalled token endpoint reports unverified once the probe timeout fires", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
+  const failures = [];
+  const result = await checkDriveRefreshGrant({
+    ...OPTIONS,
+    timeoutMs: 25,
+    onFailure: (failure) => failures.push(failure),
+    fetchImpl: (_url, init) => new Promise((_, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    }),
+  });
+  assert.deepEqual(result, { outcome: "unverified" });
+  assert.deepEqual(failures, [{ category: "network" }]);
+});
+
+test("grant probe failures report a sanitized category and HTTP status only", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
+  const failures = [];
+  const onFailure = (failure) => failures.push(failure);
+  await checkDriveRefreshGrant({
+    ...OPTIONS, onFailure,
+    fetchImpl: async () => tokenResponse(500, { error: "backendError" }),
+  });
+  assert.deepEqual(failures, [{ category: "http_status", status: 500 }]);
+  failures.length = 0;
+  await checkDriveRefreshGrant({
+    ...OPTIONS, onFailure,
+    fetchImpl: async () => tokenResponse(200, {}),
+  });
+  assert.deepEqual(failures, [{ category: "malformed_response", status: 200 }]);
+  failures.length = 0;
+  await checkDriveRefreshGrant({
+    ...OPTIONS, onFailure,
+    fetchImpl: async () => { throw new Error("network unreachable"); },
+  });
+  assert.deepEqual(failures, [{ category: "network" }]);
+  // Nothing sensitive may leak into the operator trace.
+  assert.equal(JSON.stringify(failures).includes(OPTIONS.refreshToken), false);
 });
 
 test("transient token-endpoint failures report unverified, not expired", { skip: !checkDriveRefreshGrant && SKIP_REASON }, async () => {
@@ -132,4 +179,56 @@ test("an unverified grant maps to a transient error instead of reconnect guidanc
   assert.equal(failure.message.includes("expired"), false);
   // The expired outcome keeps its reconnect guidance.
   assert.equal(failedGrantError({ outcome: "expired" }).message.includes("Connect it again"), true);
+});
+
+test("a misconfigured client maps to credential guidance, not reconnect guidance", { skip: !checkDriveRefreshGrant && SKIP_REASON }, () => {
+  const failure = failedGrantError({ outcome: "misconfigured" });
+  assert.equal(failure.status, 503);
+  assert.equal(failure.message.includes("GOOGLE_CLIENT_ID"), true);
+  assert.equal(failure.message.includes("GOOGLE_CLIENT_SECRET"), true);
+  assert.equal(failure.message.includes("Connect it again"), false);
+});
+
+// The status endpoint delegates to driveConnectionStatus; these cases lock
+// the mapping the dashboard renders against.
+test("driveConnectionStatus maps the unconfigured and unconnected states", { skip: !checkDriveRefreshGrant && SKIP_REASON }, () => {
+  assert.deepEqual(
+    driveConnectionStatus({ configured: false, connection: null, grant: null }),
+    { configured: false, connected: false, email: null, rootFolderId: null, reason: null },
+  );
+  assert.deepEqual(
+    driveConnectionStatus({ configured: true, connection: null, grant: null }),
+    { configured: true, connected: false, email: null, rootFolderId: null, reason: null },
+  );
+});
+
+test("driveConnectionStatus maps a healthy connection with no reason", { skip: !checkDriveRefreshGrant && SKIP_REASON }, () => {
+  assert.deepEqual(
+    driveConnectionStatus({
+      configured: true,
+      connection: { email: "host@example.com", rootFolderId: "root-1" },
+      grant: { outcome: "healthy", accessToken: "token", expiresIn: 3600 },
+    }),
+    { configured: true, connected: true, email: "host@example.com", rootFolderId: "root-1", reason: null },
+  );
+  // A saved connection row without configured OAuth skips the probe entirely:
+  // connected stays true and no guidance is surfaced.
+  assert.deepEqual(
+    driveConnectionStatus({
+      configured: false,
+      connection: { email: "host@example.com", rootFolderId: "root-1" },
+      grant: null,
+    }),
+    { configured: false, connected: true, email: "host@example.com", rootFolderId: "root-1", reason: null },
+  );
+});
+
+test("driveConnectionStatus surfaces each failed grant outcome as the reason", { skip: !checkDriveRefreshGrant && SKIP_REASON }, () => {
+  const connection = { email: "host@example.com", rootFolderId: "root-1" };
+  for (const outcome of ["expired", "unverified", "misconfigured"]) {
+    assert.deepEqual(
+      driveConnectionStatus({ configured: true, connection, grant: { outcome } }),
+      { configured: true, connected: true, email: "host@example.com", rootFolderId: "root-1", reason: outcome },
+    );
+  }
 });

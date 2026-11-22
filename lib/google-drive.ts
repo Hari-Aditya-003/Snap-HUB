@@ -5,6 +5,7 @@ import type { AlbumRecord } from "@/lib/data";
 import {
   checkDriveRefreshGrant,
   createDriveGrantHealth,
+  driveConnectionStatus,
   failedGrantError,
   type StoredDriveGrant,
 } from "@/lib/google-drive-grant";
@@ -245,6 +246,13 @@ async function findOrCreateRootFolder(token: string) {
 }
 
 export async function saveGoogleDriveConnection(refreshToken: string, accessTokenValue: string, email: string) {
+  const previous = await getConnectionRow();
+  // Reconnecting with a *different* Google account swaps which Drive owns the
+  // root folder, but every album keeps the folder IDs created under the
+  // previous account — those folders stay unreachable from the new account.
+  // Detection + a dashboard warning is the pragmatic guard; migrating folder
+  // IDs is deliberately out of scope.
+  const accountChanged = Boolean(previous && previous.email.toLowerCase() !== email.toLowerCase());
   const rootFolderId = await findOrCreateRootFolder(accessTokenValue);
   const encryptedRefreshToken = await encryptRefreshToken(refreshToken);
   const now = Date.now();
@@ -255,7 +263,7 @@ export async function saveGoogleDriveConnection(refreshToken: string, accessToke
        email = excluded.email, root_folder_id = excluded.root_folder_id, updated_at = excluded.updated_at`,
   ).bind(CONNECTION_ID, encryptedRefreshToken, email, rootFolderId, now, now).run();
   grantHealth.seedCache({ token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now });
-  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId) };
+  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId), previousEmail: previous?.email ?? null, accountChanged };
 }
 
 export function driveFolderUrl(folderId: string) {
@@ -270,17 +278,14 @@ export async function getGoogleDriveStatus() {
   // always posts the stored refresh token to Google — a cached access token
   // must not hide a grant that was revoked since the token was minted.
   const grant = configured && connection ? await grantHealth.verify(storedGrant(connection)) : null;
-  return {
+  const status = driveConnectionStatus({
     configured,
-    connected: Boolean(connection),
-    email: connection?.email ?? null,
-    rootFolderId: connection?.root_folder_id ?? null,
-    rootFolderUrl: connection?.root_folder_id ? driveFolderUrl(connection.root_folder_id) : null,
-    // Machine-readable guidance for the host dashboard. "expired" means the
-    // stored grant was revoked, expired, or can no longer be decrypted — the
-    // account must be reconnected. "unverified" means the grant could not be
-    // checked right now (transient failure), so no action is required yet.
-    reason: grant?.outcome === "expired" ? "expired" : grant?.outcome === "unverified" ? "unverified" : null,
+    connection: connection ? { email: connection.email, rootFolderId: connection.root_folder_id } : null,
+    grant,
+  });
+  return {
+    ...status,
+    rootFolderUrl: status.rootFolderId ? driveFolderUrl(status.rootFolderId) : null,
   };
 }
 

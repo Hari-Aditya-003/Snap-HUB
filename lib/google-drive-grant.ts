@@ -8,6 +8,7 @@
 export type DriveGrantCheck =
   | { outcome: "healthy"; accessToken: string; expiresIn: number }
   | { outcome: "expired" }
+  | { outcome: "misconfigured" }
   | { outcome: "unverified" };
 
 type TokenFetch = (url: string, init: RequestInit) => Promise<Response>;
@@ -20,12 +21,38 @@ type DriveTokenResponse = {
 
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 
-// Google's token endpoint reports a dead refresh grant specifically through
-// `invalid_grant` (revoked or expired consent) and `unauthorized_client`.
-// Every other failure — 5xx, quota, malformed payloads, network errors — says
-// nothing about the grant itself, so it must not trigger reconnect guidance.
+// The grant probe runs inside the dashboard status request, so it must never
+// stall: a hung token endpoint reports "unverified" after this many
+// milliseconds instead of holding the whole response.
+export const GRANT_CHECK_TIMEOUT_MS = 8_000;
+
+// Failure categories reported to operators. They intentionally carry no
+// tokens, provider payloads, or error descriptions — only how the check
+// failed and the HTTP status when there is one.
+export type DriveGrantCheckFailure = {
+  category: "network" | "http_status" | "malformed_response" | "expired" | "misconfigured";
+  status?: number;
+};
+
+// Google's token endpoint marks a dead user grant specifically through
+// `invalid_grant` (revoked or expired consent). Only reconnecting the account
+// can repair it.
 function grantExpired(error: string | undefined) {
-  return error === "invalid_grant" || error === "unauthorized_client";
+  return error === "invalid_grant";
+}
+
+// `invalid_client` (wrong client ID/secret) and `unauthorized_client` (the
+// client is not allowed to use this grant) are OAuth client-configuration
+// problems: reconnecting cannot fix them, so they must be told apart from a
+// dead user grant — and from transient failures — in the dashboard.
+function clientMisconfigured(error: string | undefined) {
+  return error === "invalid_client" || error === "unauthorized_client";
+}
+
+function defaultFailureLog(failure: DriveGrantCheckFailure) {
+  console.warn(
+    `[google-drive-grant] refresh check failed: ${failure.category}${failure.status === undefined ? "" : ` (HTTP ${failure.status})`}`,
+  );
 }
 
 export async function checkDriveRefreshGrant(options: {
@@ -33,11 +60,14 @@ export async function checkDriveRefreshGrant(options: {
   clientSecret: string;
   refreshToken: string;
   fetchImpl?: TokenFetch;
+  timeoutMs?: number;
+  onFailure?: (failure: DriveGrantCheckFailure) => void;
 }): Promise<DriveGrantCheck> {
   const request = options.fetchImpl ?? fetch;
-  let token: DriveTokenResponse;
+  const report = options.onFailure ?? defaultFailureLog;
+  let response: Response;
   try {
-    const response = await request(TOKEN_ENDPOINT, {
+    response = await request(TOKEN_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -46,19 +76,38 @@ export async function checkDriveRefreshGrant(options: {
         refresh_token: options.refreshToken,
         grant_type: "refresh_token",
       }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? GRANT_CHECK_TIMEOUT_MS),
     });
-    token = await response.json() as DriveTokenResponse;
-    if (response.ok && token.access_token) {
-      return {
-        outcome: "healthy",
-        accessToken: token.access_token,
-        expiresIn: token.expires_in ?? 3600,
-      };
-    }
   } catch {
+    report({ category: "network" });
     return { outcome: "unverified" };
   }
-  return grantExpired(token.error) ? { outcome: "expired" } : { outcome: "unverified" };
+  let token: DriveTokenResponse;
+  try {
+    const payload: unknown = await response.json();
+    // Guard against a JSON body that is not an object at all ("null", arrays).
+    token = typeof payload === "object" && payload !== null ? payload as DriveTokenResponse : {};
+  } catch {
+    report({ category: "malformed_response", status: response.status });
+    return { outcome: "unverified" };
+  }
+  if (response.ok && token.access_token) {
+    return {
+      outcome: "healthy",
+      accessToken: token.access_token,
+      expiresIn: token.expires_in ?? 3600,
+    };
+  }
+  if (grantExpired(token.error)) {
+    report({ category: "expired", status: response.status });
+    return { outcome: "expired" };
+  }
+  if (clientMisconfigured(token.error)) {
+    report({ category: "misconfigured", status: response.status });
+    return { outcome: "misconfigured" };
+  }
+  report({ category: response.ok ? "malformed_response" : "http_status", status: response.status });
+  return { outcome: "unverified" };
 }
 
 export type CachedAccessToken = {
@@ -129,15 +178,56 @@ export function createDriveGrantHealth(options: {
   };
 }
 
+export type DriveStatusReason = "expired" | "unverified" | "misconfigured" | null;
+
+export type DriveConnectionStatus = {
+  configured: boolean;
+  connected: boolean;
+  email: string | null;
+  rootFolderId: string | null;
+  // Machine-readable guidance for the host dashboard. "expired" means the
+  // stored grant was revoked, expired, or can no longer be decrypted — the
+  // account must be reconnected. "misconfigured" means Google rejected the
+  // Worker's OAuth client credentials — the host must fix the Worker settings,
+  // reconnecting alone will not help. "unverified" means the grant could not
+  // be checked right now (transient failure), so no action is required yet.
+  reason: DriveStatusReason;
+};
+
+// Maps connection-row state plus the grant probe to the status payload the
+// host dashboard consumes. The probe only runs when a connection exists and
+// OAuth is configured, so a null grant means "nothing to report" — connected
+// stays true and no reason is surfaced.
+export function driveConnectionStatus(options: {
+  configured: boolean;
+  connection: { email: string; rootFolderId: string | null } | null;
+  grant: DriveGrantCheck | null;
+}): DriveConnectionStatus {
+  return {
+    configured: options.configured,
+    connected: Boolean(options.connection),
+    email: options.connection?.email ?? null,
+    rootFolderId: options.connection?.rootFolderId ?? null,
+    reason: options.grant && options.grant.outcome !== "healthy" ? options.grant.outcome : null,
+  };
+}
+
 export type FailedDriveGrant = Exclude<DriveGrantCheck, { outcome: "healthy" }>;
 
 // Callers that needed an access token surface a failed check as an error.
-// "expired" means only reconnecting can repair the grant, so the message
-// points at the dashboard; anything else is transient — the grant may still
-// be valid — so it reports a retryable problem instead of reconnect guidance.
+// "expired" means only reconnecting can repair the grant and "misconfigured"
+// means the Worker credentials are wrong, so those messages point at the fix;
+// anything else is transient — the grant may still be valid — so it reports a
+// retryable problem instead of reconnect guidance.
 export function failedGrantError(check: FailedDriveGrant): { message: string; status: number } {
   if (check.outcome === "expired") {
     return { message: "Google Drive authorization expired. Connect it again from the host dashboard.", status: 503 };
+  }
+  if (check.outcome === "misconfigured") {
+    return {
+      message: "Google Drive OAuth client credentials are invalid. Correct GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the Worker settings.",
+      status: 503,
+    };
   }
   return { message: "Google Drive could not be verified right now. Try again.", status: 503 };
 }
