@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   BarChart3, CalendarDays, Check, ChevronLeft, ChevronRight, CircleCheck, Clock3, Copy, Download, ExternalLink, Eye, Film,
   FolderOpen, FolderPlus, HardDrive, ImagePlus, KeyRound, LogOut, Palette, Play, Plus, QrCode,
-  Pause, Save, Settings2, Sparkles, Star, Trash2, Upload, Wallpaper, X,
+  Pause, Save, Settings2, Sparkles, Star, Trash2, TriangleAlert, Upload, Wallpaper, X,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import {
@@ -37,7 +37,12 @@ type QrMode = "gallery" | "upload" | "slideshow";
 type DriveStatus = {
   configured: boolean; connected: boolean; email: string | null;
   rootFolderId: string | null; rootFolderUrl: string | null;
+  // "expired": stored grant is revoked/expired/undecryptable and must be
+  // reconnected. "unverified": the grant could not be checked right now.
+  reason: "expired" | "unverified" | null;
 };
+
+const GOOGLE_DRIVE_SETUP_GUIDE = "https://github.com/Hari-Aditya-003/Snap-HUB/blob/main/docs/DEPLOYMENT.md#google-drive-setup";
 
 const eventTypes = ["Wedding", "Engagement", "Haldi", "Mehendi", "Sangeet", "Reception", "Birthday", "Anniversary", "Festival", "Graduation", "College event", "Corporate", "Conference", "Concert", "Party", "Reunion", "Trip", "Family gathering", "Photography event", "Other"];
 const themes = [
@@ -64,12 +69,13 @@ export function AdminDashboard() {
   const [qrMode, setQrMode] = useState<QrMode>("gallery");
   const [busy, setBusy] = useState(false);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
-  const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null });
+  const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null, reason: null });
 
   const selected = albums.find((album) => album.id === selectedId) ?? albums[0];
   const selectedMedia = useMemo(() => media.filter((item) => item.album_id === selected?.id), [media, selected]);
   const selectedCollections = useMemo(() => collections.filter((item) => item.album_id === selected?.id), [collections, selected]);
   const pendingCount = selectedMedia.filter((item) => item.moderation_status === "pending").length;
+  const driveNeedsReconnect = driveStatus.connected && driveStatus.reason === "expired";
   const totals = useMemo(() => ({
     media: albums.reduce((sum, album) => sum + Number(album.media_count), 0),
     storage: albums.reduce((sum, album) => sum + Number(album.storage_bytes), 0),
@@ -270,15 +276,24 @@ export function AdminDashboard() {
         </section>
 
         <div className="hub-content-grid">
-          <section className={`hub-card drive-connection-card ${driveStatus.connected ? "connected" : "needs-connection"}`}>
+          <section className={`hub-card drive-connection-card ${driveNeedsReconnect ? "attention" : driveStatus.connected && driveStatus.configured ? "connected" : "needs-connection"}`}>
             <div className="hub-card-title"><span><HardDrive /></span><div><h2>Google Drive</h2><p>All original photos and videos are stored only in your Drive.</p></div></div>
-            {driveStatus.connected ? <>
+            {!driveStatus.configured ? <>
+              <p className="drive-connection-copy">Snap HUB stores every original photo and video in the host&apos;s Google Drive, so the Google OAuth client must be configured on the Worker before anything can connect.</p>
+              <div className="draft-warning"><Clock3 /> Google OAuth setup is required before Drive can be connected — add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the Worker, then return here.{driveStatus.connected ? " The saved connection works again once setup is done." : ""}</div>
+              <div className="card-actions"><a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Google OAuth setup guide</a></div>
+            </> : driveNeedsReconnect ? <>
+              <div className="drive-connection-state expired"><span><TriangleAlert /> Reconnect needed</span><strong>{driveStatus.email}</strong></div>
+              <p className="drive-connection-copy">Google Drive access for this account has expired or been revoked. Uploads, media playback, and new event folders will fail until Drive is connected again — reconnecting keeps every event, memory, and Drive folder exactly as it is.</p>
+              <div className="card-actions"><a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a>{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Setup guide</a></div>
+            </> : driveStatus.connected ? <>
               <div className="drive-connection-state"><span><Check /> Connected</span><strong>{driveStatus.email}</strong></div>
               <div className="drive-folder-map"><span>Snap HUB</span><i>›</i><span>Event name</span><i>›</i><span>Photos · Videos · Guest Uploads · Highlights</span></div>
+              {driveStatus.reason === "unverified" && <p className="drive-connection-note">Snap HUB could not confirm the connection just now — reconnect only if uploads start failing.</p>}
               <div className="card-actions">{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a></div>
             </> : <>
-              <p className="drive-connection-copy">Connect the host Google account before creating an event. Snap HUB will create one folder per event and sort every upload automatically.</p>
-              {driveStatus.configured ? <a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Connect Google Drive</a> : <div className="draft-warning"><Clock3 /> Google OAuth setup is required before Drive can be connected.</div>}
+              <p className="drive-connection-copy">Connect the host Google account before creating an event. Connecting opens Google&apos;s consent screen for the host account — Snap HUB then creates one folder per event and sorts every upload automatically.</p>
+              <div className="card-actions"><a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Connect Google Drive</a><a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Setup guide</a></div>
             </>}
           </section>
 

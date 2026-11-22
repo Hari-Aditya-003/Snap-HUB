@@ -2,6 +2,7 @@ import "server-only";
 
 import { env } from "cloudflare:workers";
 import type { AlbumRecord } from "@/lib/data";
+import { checkDriveRefreshGrant, type DriveGrantCheck } from "@/lib/google-drive-grant";
 import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
@@ -162,34 +163,48 @@ async function getConnectionRow() {
   ).bind(CONNECTION_ID).first<DriveConnectionRow>();
 }
 
+// Exchanges the stored refresh token for a fresh access token and refreshes the
+// shared cache on success. A grant that can no longer be decrypted (for example
+// after SESSION_SECRET changed) reports "expired" because only reconnecting can
+// repair it; transient token-endpoint failures report "unverified" instead.
+async function connectionGrantHealth(connection: DriveConnectionRow): Promise<DriveGrantCheck> {
+  if (accessTokenCache && accessTokenCache.connectionUpdatedAt === connection.updated_at && accessTokenCache.expiresAt > Date.now() + 60_000) {
+    return {
+      outcome: "healthy",
+      accessToken: accessTokenCache.token,
+      expiresIn: Math.floor((accessTokenCache.expiresAt - Date.now()) / 1000),
+    };
+  }
+  let refreshToken: string;
+  try {
+    refreshToken = await decryptRefreshToken(connection.encrypted_refresh_token);
+  } catch {
+    return { outcome: "expired" };
+  }
+  const grant = await checkDriveRefreshGrant({
+    clientId: env.GOOGLE_CLIENT_ID,
+    clientSecret: env.GOOGLE_CLIENT_SECRET,
+    refreshToken,
+  });
+  if (grant.outcome === "healthy") {
+    accessTokenCache = {
+      token: grant.accessToken,
+      expiresAt: Date.now() + Math.max(300, grant.expiresIn) * 1000,
+      connectionUpdatedAt: connection.updated_at,
+    };
+  }
+  return grant;
+}
+
 async function accessToken() {
   if (!googleDriveConfigured()) throw new GoogleDriveError("Google Drive OAuth is not configured.", 503);
   const connection = await getConnectionRow();
   if (!connection) throw new GoogleDriveError("Connect Google Drive from the host dashboard first.", 503);
-  if (accessTokenCache && accessTokenCache.connectionUpdatedAt === connection.updated_at && accessTokenCache.expiresAt > Date.now() + 60_000) {
-    return accessTokenCache.token;
-  }
-  const refreshToken = await decryptRefreshToken(connection.encrypted_refresh_token);
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }),
-  });
-  const token = await response.json() as DriveTokenResponse;
-  if (!response.ok || !token.access_token) {
+  const grant = await connectionGrantHealth(connection);
+  if (grant.outcome !== "healthy") {
     throw new GoogleDriveError("Google Drive authorization expired. Connect it again from the host dashboard.", 503);
   }
-  accessTokenCache = {
-    token: token.access_token,
-    expiresAt: Date.now() + Math.max(300, token.expires_in ?? 3600) * 1000,
-    connectionUpdatedAt: connection.updated_at,
-  };
-  return token.access_token;
+  return grant.accessToken;
 }
 
 async function driveJson<T>(url: string, init: RequestInit = {}, suppliedAccessToken?: string) {
@@ -253,13 +268,22 @@ export function driveFolderUrl(folderId: string) {
 }
 
 export async function getGoogleDriveStatus() {
+  const configured = googleDriveConfigured();
   const connection = await getConnectionRow();
+  // Only probe the grant when a refresh can actually run: without the OAuth
+  // client settings the dashboard must show setup guidance instead.
+  const grant = configured && connection ? await connectionGrantHealth(connection) : null;
   return {
-    configured: googleDriveConfigured(),
+    configured,
     connected: Boolean(connection),
     email: connection?.email ?? null,
     rootFolderId: connection?.root_folder_id ?? null,
     rootFolderUrl: connection?.root_folder_id ? driveFolderUrl(connection.root_folder_id) : null,
+    // Machine-readable guidance for the host dashboard. "expired" means the
+    // stored grant was revoked, expired, or can no longer be decrypted — the
+    // account must be reconnected. "unverified" means the grant could not be
+    // checked right now (transient failure), so no action is required yet.
+    reason: grant?.outcome === "expired" ? "expired" : grant?.outcome === "unverified" ? "unverified" : null,
   };
 }
 

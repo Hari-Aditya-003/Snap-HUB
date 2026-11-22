@@ -240,6 +240,11 @@ img, video { max-width: 100%; }
 .drive-connection-copy { margin: .8rem 0; max-width: 720px; color: #806d7c; font-size: .78rem; line-height: 1.55; }
 .drive-connect-button { min-height: 2.65rem; padding: .65rem .9rem; display: inline-flex; align-items: center; gap: .4rem; border-radius: .75rem; color: #fff; background: linear-gradient(125deg,#ff4fa3,#8b5cf6); font-size: .75rem; font-weight: 900; }
 .drive-connect-button svg { width: 1rem; }
+.drive-connection-card.attention { border-color: #f0cf90; }
+.drive-connection-state.expired { border-color: #f0d5a0; background: #fffaf0; }
+.drive-connection-state.expired span { color: #9a6a12; }
+.drive-connection-state.expired strong { color: #7a6a55; }
+.drive-connection-note { margin: .65rem 0 0; max-width: 720px; color: #8b611e; font-size: .72rem; line-height: 1.5; }
 .wide-label input { width: 100%; min-height: 3rem; padding: 0 .9rem; border: 1px solid #ead3e1; border-radius: .82rem; color: var(--ink); background: #fffafd; outline: none; }
 .wide-label input:focus { border-color: #ff79b8; box-shadow: 0 0 0 4px rgba(255,61,152,.09); }
 .wide-label > svg { width: 1rem; }
