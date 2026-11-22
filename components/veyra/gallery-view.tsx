@@ -61,8 +61,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   useEffect(() => {
     if (!viewerOpen) return;
     const dialog = viewerRef.current;
-    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog?.focus({ preventScroll: true });
+    dialog?.querySelector<HTMLElement>(".close-show")?.focus({ preventScroll: true });
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
@@ -107,6 +106,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       document.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
       if (openerRef.current?.isConnected) openerRef.current.focus();
+      else document.querySelector<HTMLElement>(".memory-open, .filter-tabs button")?.focus();
       openerRef.current = null;
     };
   }, [viewerOpen]);
@@ -199,7 +199,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
         {filtered.map((item, index) => {
           const isVideo = item.contentType.startsWith("video/");
           return <article key={item.id} className="memory-card">
-            <button className="memory-open" onClick={() => setViewerIndex(index)} aria-label={`Open ${item.filename}`}>
+            <button className="memory-open" onClick={(event) => { openerRef.current = event.currentTarget; setViewerIndex(index); }} aria-label={`Open ${item.filename}`}>
               {isVideo ? <video src={src(item)} preload="metadata" muted playsInline /> : <img src={src(item)} alt={item.caption || item.filename} loading="lazy" decoding="async" />}
               <span className="expand-chip"><Maximize2 /> View</span>
               {isVideo && <span className="video-chip"><Play /> Video</span>}
