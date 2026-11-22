@@ -54,7 +54,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   const filteredRef = useRef(filtered);
   const viewerRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
-  const viewerOpen = viewerIndex !== null;
+  const viewerOpen = viewerIndex !== null && filtered[viewerIndex] !== undefined;
 
   useEffect(() => { filteredRef.current = filtered; }, [filtered]);
 
@@ -78,7 +78,10 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
         if (!focusables.length || !dialog) return;
         const first = focusables[0];
         const last = focusables[focusables.length - 1];
-        if (event.shiftKey ? document.activeElement === first : document.activeElement === last) {
+        if (document.activeElement === dialog) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey ? document.activeElement === first : document.activeElement === last) {
           event.preventDefault();
           (event.shiftKey ? last : first).focus();
         } else if (!dialog.contains(document.activeElement)) {
@@ -145,6 +148,10 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
 
   const active = viewerIndex === null ? null : filtered[viewerIndex];
   const src = (item: GalleryMedia) => `/api/gallery/${token}/photos/${item.id}`;
+
+  useEffect(() => {
+    if (viewerIndex !== null && !active) queueMicrotask(() => setViewerIndex(null));
+  }, [active, viewerIndex]);
 
   return (
     <main className={`memory-gallery theme-${album.theme}`}>
