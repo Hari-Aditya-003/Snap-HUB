@@ -2,7 +2,12 @@ import "server-only";
 
 import { env } from "cloudflare:workers";
 import type { AlbumRecord } from "@/lib/data";
-import { checkDriveRefreshGrant, type DriveGrantCheck } from "@/lib/google-drive-grant";
+import {
+  checkDriveRefreshGrant,
+  createDriveGrantHealth,
+  failedGrantError,
+  type StoredDriveGrant,
+} from "@/lib/google-drive-grant";
 import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
@@ -29,7 +34,18 @@ type DriveTokenResponse = {
 
 type DriveFile = { id: string; name?: string; size?: string; mimeType?: string };
 
-let accessTokenCache: { token: string; expiresAt: number; connectionUpdatedAt: number } | null = null;
+// The grant-health checker owns the shared access-token cache. `verify`
+// always exercises the stored refresh grant (the status path), while
+// `accessTokenHealth` may reuse a still-fresh minted token for real Drive API
+// calls — the refresh path recovers when a cached token dies early.
+const grantHealth = createDriveGrantHealth({
+  checkGrant: (refreshToken) =>
+    checkDriveRefreshGrant({
+      clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET,
+      refreshToken,
+    }),
+});
 
 export class GoogleDriveError extends Error {
   constructor(message: string, public readonly status = 502) {
@@ -163,46 +179,25 @@ async function getConnectionRow() {
   ).bind(CONNECTION_ID).first<DriveConnectionRow>();
 }
 
-// Exchanges the stored refresh token for a fresh access token and refreshes the
-// shared cache on success. A grant that can no longer be decrypted (for example
-// after SESSION_SECRET changed) reports "expired" because only reconnecting can
-// repair it; transient token-endpoint failures report "unverified" instead.
-async function connectionGrantHealth(connection: DriveConnectionRow): Promise<DriveGrantCheck> {
-  if (accessTokenCache && accessTokenCache.connectionUpdatedAt === connection.updated_at && accessTokenCache.expiresAt > Date.now() + 60_000) {
-    return {
-      outcome: "healthy",
-      accessToken: accessTokenCache.token,
-      expiresIn: Math.floor((accessTokenCache.expiresAt - Date.now()) / 1000),
-    };
-  }
-  let refreshToken: string;
-  try {
-    refreshToken = await decryptRefreshToken(connection.encrypted_refresh_token);
-  } catch {
-    return { outcome: "expired" };
-  }
-  const grant = await checkDriveRefreshGrant({
-    clientId: env.GOOGLE_CLIENT_ID,
-    clientSecret: env.GOOGLE_CLIENT_SECRET,
-    refreshToken,
-  });
-  if (grant.outcome === "healthy") {
-    accessTokenCache = {
-      token: grant.accessToken,
-      expiresAt: Date.now() + Math.max(300, grant.expiresIn) * 1000,
-      connectionUpdatedAt: connection.updated_at,
-    };
-  }
-  return grant;
+// Wraps a connection row for the grant-health checker. A stored refresh token
+// that can no longer be decrypted (for example after SESSION_SECRET changed)
+// reports "expired" because only reconnecting can repair it; transient
+// token-endpoint failures report "unverified" instead.
+function storedGrant(connection: DriveConnectionRow): StoredDriveGrant {
+  return {
+    connectionUpdatedAt: connection.updated_at,
+    decryptRefreshToken: () => decryptRefreshToken(connection.encrypted_refresh_token),
+  };
 }
 
 async function accessToken() {
   if (!googleDriveConfigured()) throw new GoogleDriveError("Google Drive OAuth is not configured.", 503);
   const connection = await getConnectionRow();
   if (!connection) throw new GoogleDriveError("Connect Google Drive from the host dashboard first.", 503);
-  const grant = await connectionGrantHealth(connection);
+  const grant = await grantHealth.accessTokenHealth(storedGrant(connection));
   if (grant.outcome !== "healthy") {
-    throw new GoogleDriveError("Google Drive authorization expired. Connect it again from the host dashboard.", 503);
+    const failure = failedGrantError(grant);
+    throw new GoogleDriveError(failure.message, failure.status);
   }
   return grant.accessToken;
 }
@@ -259,7 +254,7 @@ export async function saveGoogleDriveConnection(refreshToken: string, accessToke
      ON CONFLICT(id) DO UPDATE SET encrypted_refresh_token = excluded.encrypted_refresh_token,
        email = excluded.email, root_folder_id = excluded.root_folder_id, updated_at = excluded.updated_at`,
   ).bind(CONNECTION_ID, encryptedRefreshToken, email, rootFolderId, now, now).run();
-  accessTokenCache = { token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now };
+  grantHealth.seedCache({ token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now });
   return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId) };
 }
 
@@ -271,8 +266,10 @@ export async function getGoogleDriveStatus() {
   const configured = googleDriveConfigured();
   const connection = await getConnectionRow();
   // Only probe the grant when a refresh can actually run: without the OAuth
-  // client settings the dashboard must show setup guidance instead.
-  const grant = configured && connection ? await connectionGrantHealth(connection) : null;
+  // client settings the dashboard must show setup guidance instead. The probe
+  // always posts the stored refresh token to Google — a cached access token
+  // must not hide a grant that was revoked since the token was minted.
+  const grant = configured && connection ? await grantHealth.verify(storedGrant(connection)) : null;
   return {
     configured,
     connected: Boolean(connection),

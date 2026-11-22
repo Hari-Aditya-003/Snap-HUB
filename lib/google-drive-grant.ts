@@ -60,3 +60,84 @@ export async function checkDriveRefreshGrant(options: {
   }
   return grantExpired(token.error) ? { outcome: "expired" } : { outcome: "unverified" };
 }
+
+export type CachedAccessToken = {
+  token: string;
+  expiresAt: number;
+  connectionUpdatedAt: number;
+};
+
+export type StoredDriveGrant = {
+  // Version of the connection row the grant belongs to. Reconnecting rewrites
+  // the row, which invalidates access tokens cached for the previous grant.
+  connectionUpdatedAt: number;
+  // Resolves the stored refresh token. Throws when it can no longer be
+  // decrypted (for example after SESSION_SECRET changed) — only reconnecting
+  // can repair that, so it is reported as "expired".
+  decryptRefreshToken: () => Promise<string>;
+};
+
+// Owns the access-token cache shared by the status probe and the Drive API
+// path. `verify` always exercises the stored refresh grant against Google;
+// `accessTokenHealth` may reuse a still-fresh minted token because the refresh
+// path recovers when a cached token dies early.
+export function createDriveGrantHealth(options: {
+  checkGrant: (refreshToken: string) => Promise<DriveGrantCheck>;
+  now?: () => number;
+}) {
+  const now = options.now ?? (() => Date.now());
+  let cache: CachedAccessToken | null = null;
+
+  // Always checks the refresh grant itself — never a cached access token — so
+  // a revoked grant cannot hide behind a token that has not expired yet.
+  async function verify(grant: StoredDriveGrant): Promise<DriveGrantCheck> {
+    let refreshToken: string;
+    try {
+      refreshToken = await grant.decryptRefreshToken();
+    } catch {
+      return { outcome: "expired" };
+    }
+    const check = await options.checkGrant(refreshToken);
+    if (check.outcome === "healthy") {
+      cache = {
+        token: check.accessToken,
+        expiresAt: now() + Math.max(300, check.expiresIn) * 1000,
+        connectionUpdatedAt: grant.connectionUpdatedAt,
+      };
+    }
+    return check;
+  }
+
+  async function accessTokenHealth(grant: StoredDriveGrant): Promise<DriveGrantCheck> {
+    if (cache && cache.connectionUpdatedAt === grant.connectionUpdatedAt && cache.expiresAt > now() + 60_000) {
+      return {
+        outcome: "healthy",
+        accessToken: cache.token,
+        expiresIn: Math.floor((cache.expiresAt - now()) / 1000),
+      };
+    }
+    return verify(grant);
+  }
+
+  return {
+    verify,
+    accessTokenHealth,
+    // Lets the OAuth callback seed the cache with the just-minted token.
+    seedCache(entry: CachedAccessToken | null) {
+      cache = entry;
+    },
+  };
+}
+
+export type FailedDriveGrant = Exclude<DriveGrantCheck, { outcome: "healthy" }>;
+
+// Callers that needed an access token surface a failed check as an error.
+// "expired" means only reconnecting can repair the grant, so the message
+// points at the dashboard; anything else is transient — the grant may still
+// be valid — so it reports a retryable problem instead of reconnect guidance.
+export function failedGrantError(check: FailedDriveGrant): { message: string; status: number } {
+  if (check.outcome === "expired") {
+    return { message: "Google Drive authorization expired. Connect it again from the host dashboard.", status: 503 };
+  }
+  return { message: "Google Drive could not be verified right now. Try again.", status: 503 };
+}
