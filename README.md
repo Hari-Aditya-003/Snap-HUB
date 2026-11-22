@@ -100,6 +100,8 @@ npm run sample:gallery:reset   # removes only the sample event
 rm -rf .wrangler/state         # wipes ALL local D1 data; re-run db:migrate:local after
 ```
 
+To verify a normal build still takes the Drive path for originals: run `npm run build` and start the Worker without `SAMPLE_MEDIA` in `.dev.vars` (or set `SAMPLE_MEDIA=0`). Requests to `sample:` object keys then return 404 instead of synthesized bytes — the dev-only branch in `lib/sample-media.ts` is gated off — and media for real events continues to resolve through their stored Google Drive file IDs.
+
 Useful checks:
 
 ```bash
