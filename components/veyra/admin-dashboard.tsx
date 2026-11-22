@@ -252,15 +252,17 @@ export function AdminDashboard() {
     if (!selected) return;
     setAlbums((current) => current.map((album) => album.id === selected.id ? { ...album, ...patch } : album));
   }
+  const copyAttemptRef = useRef(0);
   async function copy(value: string, label: string) {
+    const attempt = ++copyAttemptRef.current;
     const version = copyVersionRef.current;
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
       await navigator.clipboard.writeText(value);
-      setCopyFallback(null);
+      if (attempt === copyAttemptRef.current) setCopyFallback(null);
       toast.success(`${label} copied`);
     } catch {
-      if (version !== copyVersionRef.current) return;
+      if (attempt !== copyAttemptRef.current || version !== copyVersionRef.current) return;
       setCopyFallback({ label, value });
       toast.error(`Couldn’t copy the ${label.toLowerCase()} — select and copy it manually below.`);
     }
