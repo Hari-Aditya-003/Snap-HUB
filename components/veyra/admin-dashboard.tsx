@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 import Link from "next/link";
 import {
@@ -151,9 +151,11 @@ export function AdminDashboard() {
     }
     void QRCode.toDataURL(qrTarget, { width: 360, margin: 1, color: { dark: "#5a1749", light: "#fff8fc" } }).then(setQrDataUrl);
   }, [qrTarget]);
+  const copyVersionRef = useRef(0);
   useEffect(() => {
+    copyVersionRef.current += 1;
     void Promise.resolve().then(() => setCopyFallback(null));
-  }, [qrTarget, selected?.id]);
+  }, [qrTarget, selected?.id, selected?.guest_username, selected?.guest_password]);
 
   async function createAlbum(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true);
@@ -251,12 +253,14 @@ export function AdminDashboard() {
     setAlbums((current) => current.map((album) => album.id === selected.id ? { ...album, ...patch } : album));
   }
   async function copy(value: string, label: string) {
+    const version = copyVersionRef.current;
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
       await navigator.clipboard.writeText(value);
       setCopyFallback(null);
       toast.success(`${label} copied`);
     } catch {
+      if (version !== copyVersionRef.current) return;
       setCopyFallback({ label, value });
       toast.error(`Couldn’t copy the ${label.toLowerCase()} — select and copy it manually below.`);
     }
