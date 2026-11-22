@@ -259,7 +259,8 @@ export function AdminDashboard() {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
       await navigator.clipboard.writeText(value);
-      if (attempt === copyAttemptRef.current) setCopyFallback(null);
+      if (attempt !== copyAttemptRef.current || version !== copyVersionRef.current) return;
+      setCopyFallback(null);
       toast.success(`${label} copied`);
     } catch {
       if (attempt !== copyAttemptRef.current || version !== copyVersionRef.current) return;
