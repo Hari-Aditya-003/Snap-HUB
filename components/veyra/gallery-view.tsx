@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import Link from "next/link";
+import { filterUnsentFiles, mediaUploadKey } from "@/lib/uploads";
 
 type GalleryMedia = {
   id: string; filename: string; contentType: string; caption: string; isFeatured: boolean;
@@ -47,7 +48,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [savedUploads, setSavedUploads] = useState<Set<string>>(new Set());
+  const [savedUploads, setSavedUploads] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     const stored = window.localStorage.getItem(`snap-hub-favorites:${token}`);
@@ -86,14 +87,17 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   function rememberSaved(photos?: UploadPhotoResult[]) {
     if (!photos?.length) return;
     setSavedUploads((current) => {
-      const next = new Set(current);
-      for (const photo of photos) next.add(`${photo.filename}:${photo.size ?? ""}`);
+      const next = new Map(current);
+      for (const photo of photos) {
+        const key = mediaUploadKey(photo.filename, photo.size);
+        next.set(key, (next.get(key) ?? 0) + 1);
+      }
       return next;
     });
   }
   function closeUploadPanel() {
     setUploadOpen(false);
-    setSavedUploads(new Set());
+    setSavedUploads(new Map());
   }
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -101,7 +105,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const body = new FormData(form);
     const picker = form.querySelector<HTMLInputElement>('input[name="photos"]');
     const selected = picker?.files ? [...picker.files] : [];
-    const filesToSend = selected.filter((file) => !savedUploads.has(`${file.name}:${file.size}`));
+    const filesToSend = filterUnsentFiles(selected, savedUploads);
     const alreadySaved = selected.length - filesToSend.length;
     if (alreadySaved) {
       body.delete("photos");
@@ -116,6 +120,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     if (alreadySaved) {
       toast.info(`${alreadySaved} already saved — sending only the remaining ${filesToSend.length}`);
     }
+    if (savedUploads.size) body.set("knownSaved", JSON.stringify(Object.fromEntries(savedUploads)));
 
     setUploading(true);
     let response: Response | null = null;
@@ -151,7 +156,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     }
 
     form.reset();
-    setSavedUploads(new Set());
+    setSavedUploads(new Map());
     toast.success(data?.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
     setUploadOpen(false);
   }

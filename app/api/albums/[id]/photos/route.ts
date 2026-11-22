@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getAlbumById } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { isAdmin } from "@/lib/security";
-import { splitMediaFiles } from "@/lib/uploads";
+import { findRecentUpload, mediaUploadKey, parseKnownSaved, splitMediaFiles } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -31,9 +31,24 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   }
 
   const created: Array<Record<string, unknown>> = [];
+  // Per-key upload positions, starting from the saves the browser already knows
+  // about, so retried files are matched against distinct previously saved rows.
+  const positions = parseKnownSaved(form.get("knownSaved"));
   try {
     const folders = await ensureEventDriveFolders(album);
     for (const file of accepted) {
+      // A retry of an upload that already committed — but whose response never
+      // reached the host — is reported as saved instead of inserted twice.
+      const key = mediaUploadKey(file.name, file.size);
+      const position = positions.get(key) ?? 0;
+      positions.set(key, position + 1);
+      const recent = await findRecentUpload(env.DB, {
+        albumId, filename: file.name, size: file.size, uploaderName: "Host", source: "host",
+      }, position);
+      if (recent) {
+        created.push({ id: recent.id, filename: file.name, size: file.size });
+        continue;
+      }
       const photoId = crypto.randomUUID();
       const folderId = file.type.startsWith("video/") ? folders.videosFolderId : folders.photosFolderId;
       const uploaded = await uploadDriveMedia(file, folderId, { albumId, photoId, source: "host" });

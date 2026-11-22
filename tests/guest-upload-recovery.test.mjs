@@ -10,7 +10,7 @@ try {
   if (error?.code !== "ERR_UNKNOWN_FILE_EXTENSION") throw error;
 }
 const needsTypeStripping = uploads ? false : "requires Node >= 22.18 (or --experimental-strip-types) to import .ts modules";
-const { checkMediaFile, splitMediaFiles, MAX_MEDIA_FILE_SIZE } = uploads ?? {};
+const { checkMediaFile, splitMediaFiles, MAX_MEDIA_FILE_SIZE, filterUnsentFiles, findRecentUpload, mediaUploadKey, parseKnownSaved, UPLOAD_RETRY_WINDOW_MS } = uploads ?? {};
 
 const PNG_HEADER = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const JPEG_HEADER = [0xff, 0xd8, 0xff, 0xe0];
@@ -67,11 +67,77 @@ test("a fully rejected batch explains every failure", { skip: needsTypeStripping
 test("a retry that filters out confirmed saves only resends the rejected files", { skip: needsTypeStripping }, async () => {
   const batch = [png("good.png"), oversized("huge.mov"), new File(["plain text"], "notes.txt", { type: "text/plain" })];
   const { accepted, rejected } = await splitMediaFiles(batch);
-  // The guest view keys confirmed uploads as `${filename}:${size}` from the API response.
-  const saved = new Set(accepted.map((file) => `${file.name}:${file.size}`));
-  const retry = batch.filter((file) => !saved.has(`${file.name}:${file.size}`));
+  // The guest view counts confirmed uploads per `filename:size` key from the API response.
+  const saved = new Map(accepted.map((file) => [mediaUploadKey(file.name, file.size), 1]));
+  const retry = filterUnsentFiles(batch, saved);
   assert.deepEqual(retry.map((file) => file.name), ["huge.mov", "notes.txt"]);
   const secondAttempt = await splitMediaFiles(retry);
   assert.equal(secondAttempt.accepted.length, 0);
   assert.deepEqual(secondAttempt.rejected, rejected);
+});
+
+test("two distinct files with the same name and size are not both skipped on retry", { skip: needsTypeStripping }, () => {
+  const first = png("duplicate.png");
+  const second = new File([new Uint8Array([...PNG_HEADER, 9, 9, 9, 9])], "duplicate.png", { type: "image/png" });
+  assert.equal(first.size, second.size);
+  // Only one was confirmed saved, so exactly one matching file must still send.
+  const saved = new Map([[mediaUploadKey("duplicate.png", first.size), 1]]);
+  assert.deepEqual(filterUnsentFiles([first, second], saved), [second]);
+  // If both were confirmed (e.g. a retried batch that committed twice), both are skipped.
+  const savedTwice = new Map([[mediaUploadKey("duplicate.png", first.size), 2]]);
+  assert.deepEqual(filterUnsentFiles([first, second], savedTwice), []);
+  // A different size under the same name is a different file and still sends.
+  const other = new File([new Uint8Array([...PNG_HEADER, 0])], "duplicate.png", { type: "image/png" });
+  assert.deepEqual(filterUnsentFiles([first, other], saved), [other]);
+});
+
+// Minimal D1 stand-in that applies the same WHERE/ORDER/LIMIT-OFFSET semantics
+// as the dedupe query in lib/uploads.ts.
+function fakeD1(rows) {
+  return {
+    prepare: () => ({
+      bind: (albumId, filename, size, uploaderName, source, cutoff, offset = 0) => ({
+        first: async () => rows
+          .filter((row) => row.album_id === albumId && row.filename === filename && row.size === size
+            && row.uploader_name === uploaderName && row.source === source
+            && row.moderation_status !== "rejected" && row.created_at > cutoff)
+          .sort((a, b) => a.created_at - b.created_at)[offset] ?? null,
+      }),
+    }),
+  };
+}
+
+const match = { albumId: "album-1", filename: "good.png", size: 12, uploaderName: "Guest", source: "guest" };
+
+function savedRow(id, ageMs = 60_000) {
+  return { id, moderation_status: "pending", album_id: "album-1", filename: "good.png", size: 12, uploader_name: "Guest", source: "guest", created_at: Date.now() - ageMs };
+}
+
+test("a just-saved upload is deduplicated instead of inserted again", { skip: needsTypeStripping }, async () => {
+  assert.deepEqual(await findRecentUpload(fakeD1([savedRow("photo-a")]), match, 0), { id: "photo-a", moderationStatus: "pending" });
+});
+
+test("an upload with no recent matching row is not deduplicated", { skip: needsTypeStripping }, async () => {
+  assert.equal(await findRecentUpload(fakeD1([]), match, 0), null);
+  // Rows outside the retry window or already rejected do not count as saved.
+  assert.equal(await findRecentUpload(fakeD1([savedRow("old", UPLOAD_RETRY_WINDOW_MS * 2)]), match, 0), null);
+  assert.equal(await findRecentUpload(fakeD1([{ ...savedRow("bad"), moderation_status: "rejected" }]), match, 0), null);
+});
+
+test("dedupe position matches each retried file to a distinct prior row", { skip: needsTypeStripping }, async () => {
+  const db = fakeD1([savedRow("first", 120_000), savedRow("second", 30_000)]);
+  // Two committed rows cover two retried same-name+size files, in upload order.
+  assert.equal((await findRecentUpload(db, match, 0)).id, "first");
+  assert.equal((await findRecentUpload(db, match, 1)).id, "second");
+  // A third occurrence has no committed row, so it is inserted as new.
+  assert.equal(await findRecentUpload(db, match, 2), null);
+  // When the client reports one known save, the next file starts at position 1.
+  assert.equal((await findRecentUpload(db, match, 1)).id, "second");
+});
+
+test("parseKnownSaved reads the counts the upload form posts back", { skip: needsTypeStripping }, () => {
+  assert.deepEqual(parseKnownSaved('{"good.png:12":1,"clip.mov:9":2}'), new Map([["good.png:12", 1], ["clip.mov:9", 2]]));
+  assert.deepEqual(parseKnownSaved(null), new Map());
+  assert.deepEqual(parseKnownSaved("not json"), new Map());
+  assert.deepEqual(parseKnownSaved('{"a:1":"nope","b:2":0}'), new Map());
 });

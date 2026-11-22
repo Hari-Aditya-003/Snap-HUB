@@ -21,6 +21,66 @@ export const MAX_MEDIA_FILE_SIZE = 75 * 1024 * 1024;
 
 export type MediaRejection = { filename: string; reason: string };
 
+// Retries of an upload that committed before its response was lost must not
+// create duplicate gallery entries, so a matching row inside this window is
+// reported as already saved instead of being inserted again.
+export const UPLOAD_RETRY_WINDOW_MS = 10 * 60 * 1000;
+
+// How many saves of each `filename:size` key the browser already knows about —
+// the upload form posts this back so the server can line retried files up with
+// the rows an earlier attempt committed.
+export function parseKnownSaved(raw: FormDataEntryValue | null): Map<string, number> {
+  const known = new Map<string, number>();
+  if (typeof raw !== "string" || !raw) return known;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        known.set(key, Math.floor(value));
+      }
+    }
+  } catch { /* Treat malformed input as "no known saves". */ }
+  return known;
+}
+
+export function mediaUploadKey(name: string, size?: number) {
+  return `${name}:${size ?? ""}`;
+}
+
+// Removes up to `savedCounts[key]` files per upload key, in order — a batch
+// may hold distinct files that share a name and size, and only the ones the
+// server confirmed should be skipped on retry.
+export function filterUnsentFiles<T extends { name: string; size: number }>(files: T[], savedCounts: ReadonlyMap<string, number>): T[] {
+  const remaining = new Map(savedCounts);
+  return files.filter((file) => {
+    const skipped = remaining.get(mediaUploadKey(file.name, file.size)) ?? 0;
+    if (!skipped) return true;
+    remaining.set(mediaUploadKey(file.name, file.size), skipped - 1);
+    return false;
+  });
+}
+
+export type RecentUploadMatch = {
+  albumId: string; filename: string; size: number; uploaderName: string; source: "guest" | "host";
+};
+
+// Returns the prior row occupying `position` in upload order for this file's
+// key, or null when fewer prior rows exist — meaning this occurrence still
+// needs to be inserted. Position is per-key across attempts (known saves plus
+// earlier occurrences in this request), so distinct files that happen to share
+// a name and size are matched with distinct rows instead of collapsing onto
+// the newest one.
+export async function findRecentUpload(db: D1Database, match: RecentUploadMatch, position: number) {
+  const row = await db.prepare(
+    `SELECT id, moderation_status FROM photos
+     WHERE album_id = ? AND filename = ? AND size = ? AND uploader_name = ? AND source = ?
+       AND moderation_status != 'rejected' AND created_at > ?
+     ORDER BY created_at ASC LIMIT 1 OFFSET ?`,
+  ).bind(match.albumId, match.filename, match.size, match.uploaderName, match.source,
+    Date.now() - UPLOAD_RETRY_WINDOW_MS, position).first<{ id: string; moderation_status: string }>();
+  return row ? { id: row.id, moderationStatus: row.moderation_status } : null;
+}
+
 export async function checkMediaFile(file: File): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (file.size > MAX_MEDIA_FILE_SIZE) return { ok: false, reason: "over 75 MB" };
   if (!isAllowedMedia(file)) return { ok: false, reason: "unsupported file type" };

@@ -5,7 +5,7 @@ import { getAlbumByToken } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { canViewGallery } from "@/lib/security";
 import { isRateLimited } from "@/lib/rate-limit";
-import { splitMediaFiles } from "@/lib/uploads";
+import { findRecentUpload, mediaUploadKey, parseKnownSaved, splitMediaFiles } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
@@ -43,9 +43,25 @@ export async function POST(request: Request, context: { params: Promise<{ token:
 
   const moderationStatus = album.moderation_mode === "instant" ? "approved" : "pending";
   const created: Array<{ id: string; filename: string; size: number; moderationStatus: string }> = [];
+  // Per-key upload positions, starting from the saves the browser already knows
+  // about, so retried files are matched against distinct previously saved rows.
+  const positions = parseKnownSaved(form.get("knownSaved"));
+  let inserted = 0;
   try {
     const folders = await ensureEventDriveFolders(album);
     for (const file of accepted) {
+      // A retry of an upload that already committed — but whose response never
+      // reached the guest — is reported as saved instead of inserted twice.
+      const key = mediaUploadKey(file.name, file.size);
+      const position = positions.get(key) ?? 0;
+      positions.set(key, position + 1);
+      const recent = await findRecentUpload(env.DB, {
+        albumId: album.id, filename: file.name, size: file.size, uploaderName, source: "guest",
+      }, position);
+      if (recent) {
+        created.push({ id: recent.id, filename: file.name, size: file.size, moderationStatus: recent.moderationStatus });
+        continue;
+      }
       const photoId = crypto.randomUUID();
       const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" });
       try {
@@ -60,12 +76,13 @@ export async function POST(request: Request, context: { params: Promise<{ token:
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
       created.push({ id: photoId, filename: file.name, size: file.size, moderationStatus });
+      inserted += 1;
     }
   } catch (error) {
     const message = error instanceof GoogleDriveError ? error.message : "Google Drive upload failed.";
     const status = error instanceof GoogleDriveError ? error.status : 502;
     return NextResponse.json({ error: message, photos: created, rejected }, { status });
   }
-  await recordEventMetric(album.id, "guest_uploads", created.length);
+  if (inserted) await recordEventMetric(album.id, "guest_uploads", inserted);
   return NextResponse.json({ photos: created, rejected, moderationStatus });
 }
