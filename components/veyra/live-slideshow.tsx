@@ -16,28 +16,39 @@ export function LiveSlideshow({ title, token, initialMedia, initialControl }: { 
   const [musicPlaying, setMusicPlaying] = useState(false);
   const [musicBlocked, setMusicBlocked] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const mediaRef = useRef(initialMedia);
   const playing = remoteControl.playing && !localPaused;
+
+  useEffect(() => { mediaRef.current = media; }, [media]);
 
   useEffect(() => {
     let active = true;
+    let inFlight = false;
     const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
         if (!response.ok) throw new Error(`Slideshow refresh failed with ${response.status}`);
         const data = await response.json() as { media: SlideMedia[]; slideshow: SlideshowControl };
         if (!active) return;
         setConnection("connected");
-        setMedia(data.media);
         setRemoteControl((current) => {
-          if (data.slideshow.updatedAt !== current.updatedAt) {
-            setIndex(data.media.length ? Math.min(data.slideshow.position, data.media.length - 1) : 0);
-          } else {
-            setIndex((value) => data.media.length ? Math.min(value, data.media.length - 1) : 0);
-          }
+          const hostMoved = data.slideshow.updatedAt !== current.updatedAt;
+          setIndex((value) => {
+            if (!data.media.length) return 0;
+            if (hostMoved) return Math.min(data.slideshow.position, data.media.length - 1);
+            const currentId = mediaRef.current[value]?.id;
+            const preserved = currentId ? data.media.findIndex((item) => item.id === currentId) : -1;
+            return preserved >= 0 ? preserved : Math.min(value, data.media.length - 1);
+          });
           return data.slideshow;
         });
+        setMedia(data.media);
       } catch {
         if (active) setConnection("reconnecting");
+      } finally {
+        inFlight = false;
       }
     };
     const onVisibilityChange = () => { if (document.visibilityState === "visible") void refresh(); };
