@@ -30,6 +30,28 @@ type DriveFile = { id: string; name?: string; size?: string; mimeType?: string }
 
 let accessTokenCache: { token: string; expiresAt: number; connectionUpdatedAt: number } | null = null;
 
+// The browser smoke suite launches the local Worker with SNAP_HUB_FAKE_DRIVE=1
+// so uploads, reads, and deletes stay inside the test runtime instead of
+// reaching Google. Keep the fake bytes valid for the declared content type so
+// <img> elements still render in a real browser.
+function fakeDriveEnabled() {
+  return env.SNAP_HUB_FAKE_DRIVE === "1";
+}
+
+const FAKE_PNG_BYTES = Uint8Array.from(
+  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="),
+  (character) => character.charCodeAt(0),
+);
+const FAKE_MP4_BYTES = Uint8Array.from([
+  0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, // ftyp box header
+  0x6d, 0x70, 0x34, 0x32, 0x00, 0x00, 0x00, 0x00, // mp42 major brand
+  0x6d, 0x70, 0x34, 0x32, 0x69, 0x73, 0x6f, 0x6d, // compatible brands
+]);
+
+function fakeMediaBytes(contentType: string) {
+  return contentType.startsWith("video/") ? FAKE_MP4_BYTES : FAKE_PNG_BYTES;
+}
+
 export class GoogleDriveError extends Error {
   constructor(message: string, public readonly status = 502) {
     super(message);
@@ -264,7 +286,7 @@ export async function getGoogleDriveStatus() {
 }
 
 export async function deleteDriveFile(fileId: string | null | undefined) {
-  if (!fileId) return;
+  if (!fileId || fakeDriveEnabled()) return;
   const token = await accessToken();
   const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: "DELETE",
@@ -282,6 +304,15 @@ export type EventDriveFolders = {
 };
 
 export async function createEventDriveFolders(albumId: string, title: string): Promise<EventDriveFolders> {
+  if (fakeDriveEnabled()) {
+    return {
+      eventFolderId: "fake-drive-event-folder",
+      photosFolderId: "fake-drive-photos-folder",
+      videosFolderId: "fake-drive-videos-folder",
+      guestUploadsFolderId: "fake-drive-guest-uploads-folder",
+      folderUrl: "",
+    };
+  }
   const connection = await getConnectionRow();
   if (!connection) throw new GoogleDriveError("Connect Google Drive from the host dashboard first.", 503);
   const eventFolder = await createFolder(title.slice(0, 180), connection.root_folder_id, { snapHubEventId: albumId, snapHubType: "event" });
@@ -335,6 +366,9 @@ function safeDriveFilename(filename: string) {
 }
 
 export async function uploadDriveMedia(file: File, folderId: string, metadata: { albumId: string; photoId: string; source: string }) {
+  if (fakeDriveEnabled()) {
+    return { id: `fake-drive-${metadata.photoId}`, name: safeDriveFilename(file.name), size: String(file.size), mimeType: file.type };
+  }
   const token = await accessToken();
   const initiate = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,mimeType", {
     method: "POST",
@@ -382,6 +416,18 @@ export async function driveMediaResponse(fileId: string, request: Request, optio
   download?: boolean;
   cacheControl?: string;
 }) {
+  if (fakeDriveEnabled()) {
+    const body = fakeMediaBytes(options.contentType);
+    return new Response(body, {
+      headers: {
+        "Content-Type": options.contentType,
+        "Cache-Control": options.cacheControl ?? "private, max-age=3600",
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": `${options.download ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(options.filename)}`,
+        "Content-Length": String(body.byteLength),
+      },
+    });
+  }
   const token = await accessToken();
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   const range = request.headers.get("range");

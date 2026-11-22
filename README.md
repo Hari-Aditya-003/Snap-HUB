@@ -90,6 +90,15 @@ npm audit --omit=dev
 
 Database migrations live in `drizzle/`. Local migrations use a local database; `npm run db:migrate:remote` explicitly applies them to your configured Cloudflare account. `npm test` builds the real Worker and checks its login, authorization, database access, and standalone artifact in an isolated local runtime.
 
+Browser smoke coverage lives in `tests/browser/` and drives a real Chromium window through the guest gallery and moderation: a guest opens an event link, browses media in the viewer, then uploads a photo that stays pending until the host approves it through the same PATCH endpoint the dashboard uses. The suite boots `wrangler dev` itself against a disposable local D1 database and enables `SNAP_HUB_FAKE_DRIVE`, a built-in fake adapter, so it never touches a Google account or the public internet.
+
+```bash
+npx playwright install --with-deps chromium   # one-time browser download
+npm run test:browser                          # builds the Worker, then runs the smoke spec
+```
+
+CI must install the browser before running the suite — the same `npx playwright install --with-deps chromium` command, which also fetches the system libraries Chromium needs on Linux.
+
 For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions repeats the dependency audit, lint, and production build on every push and pull request, while Dependabot monitors npm updates weekly.
 
 ## iOS build and installation

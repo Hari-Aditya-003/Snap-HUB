@@ -56,13 +56,30 @@ before(async () => {
 }, { timeout: 120_000 });
 
 after(async () => {
-  if (server && server.exitCode === null) {
+  if (server && server.exitCode === null && server.pid) {
     const stopped = new Promise((done) => server.once("exit", done));
-    if (process.platform === "win32") server.kill("SIGTERM");
-    else process.kill(-server.pid, "SIGTERM");
-    await stopped;
+    if (process.platform === "win32") {
+      // `wrangler dev` spawns workerd.exe children that keep D1 sqlite files
+      // locked. SIGTERM on Windows only reaches the node process, so kill the
+      // whole tree before removing the state directory.
+      spawnSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore" });
+    } else {
+      process.kill(-server.pid, "SIGTERM");
+    }
+    await Promise.race([stopped, delay(15_000)]);
   }
-  if (state) rmSync(state, { recursive: true, force: true });
+  // File locks can outlive the process briefly on Windows; retry and never let
+  // cleanup failure hide the real test result.
+  if (state) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        rmSync(state, { recursive: true, force: true });
+        break;
+      } catch {
+        await delay(500);
+      }
+    }
+  }
 });
 
 test("deployment artifact contains D1 migrations and needs no Sites bindings", () => {

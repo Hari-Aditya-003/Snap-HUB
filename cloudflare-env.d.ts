@@ -6,5 +6,6 @@ declare namespace Cloudflare {
     SESSION_SECRET: string;
     GOOGLE_CLIENT_ID: string;
     GOOGLE_CLIENT_SECRET: string;
+    SNAP_HUB_FAKE_DRIVE?: string;
   }
 }
