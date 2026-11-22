@@ -88,9 +88,15 @@ function ensureDevVars() {
     return;
   }
   const current = readFileSync(devVarsPath, "utf8");
-  if (!/^SAMPLE_MEDIA=/m.test(current)) {
+  const sampleMediaSetting = current.match(/^SAMPLE_MEDIA=(.*)$/m);
+  if (!sampleMediaSetting) {
     writeFileSync(devVarsPath, `${current.trimEnd()}\nSAMPLE_MEDIA=1\n`);
     console.log("Added SAMPLE_MEDIA=1 to .dev.vars so generated sample media can be served locally.");
+  } else if (!/^(1|true)$/i.test(sampleMediaSetting[1].trim())) {
+    // SAMPLE_MEDIA=0 (or anything else) disables the generated media route, so
+    // the seeded gallery would 404 — flip it back on in place.
+    writeFileSync(devVarsPath, current.replace(/^SAMPLE_MEDIA=.*$/m, "SAMPLE_MEDIA=1"));
+    console.log(`Set SAMPLE_MEDIA=1 in .dev.vars (was "${sampleMediaSetting[1].trim()}") so the seeded media is served locally.`);
   }
   if (!/^SESSION_SECRET=/m.test(current) || !/^ADMIN_USERNAME=/m.test(current) || !/^ADMIN_PASSWORD=/m.test(current)) {
     console.warn("Note: .dev.vars lacks ADMIN_USERNAME/ADMIN_PASSWORD/SESSION_SECRET — /admin sign-in will fail without them.");
@@ -119,8 +125,8 @@ function seedSql() {
     ["sample-photo-05", "sample:photo:4", "group-portrait.png", "image/png", "The whole crew in one frame", 0, "sample-col-candids", "Alex", "guest", 46681, 5],
     ["sample-photo-06", "sample:photo:5", "sparkler-exit.png", "image/png", "Sparkler send-off to end the night", 1, "sample-col-candids", "Host", "host", 50212, 6],
     ["sample-photo-07", "sample:photo:6", "table-details.png", "image/png", "", 0, null, "Priya", "guest", 41566, 7],
-    ["sample-video-01", "sample:video:0", "ceremony-highlights.mp4", "video/mp4", "The ceremony in one short clip", 0, "sample-col-ceremony", "Host", "host", 1842, 8],
-    ["sample-video-02", "sample:video:1", "dance-floor.mp4", "video/mp4", "Dance floor energy", 0, "sample-col-reception", "Sam", "guest", 1842, 9],
+    ["sample-video-01", "sample:video:0", "ceremony-highlights.mp4", "video/mp4", "The ceremony in one short clip", 0, "sample-col-ceremony", "Host", "host", 1902, 8],
+    ["sample-video-02", "sample:video:1", "dance-floor.mp4", "video/mp4", "Dance floor energy", 0, "sample-col-reception", "Sam", "guest", 1901, 9],
   ];
   const collectionRows = collections
     .map(([id, name, description], index) =>
@@ -142,7 +148,7 @@ INSERT INTO albums (id, title, event_type, event_date, description, tagline, loc
 VALUES ('${ALBUM_ID}', 'Sample Wedding Celebration', 'Wedding', '2026-06-14',
   'Disposable sample event for local guest-gallery work. Seeded by npm run sample:gallery. Every photo and video is generated locally, so nothing touches Google Drive.',
   'A local fixture for filters, captions, favorites and the media viewer',
-  'Localhost', 'rose', 0, 'live', 'link', 1, 'manual', 1,
+  'Localhost', 'rose', 0, 'live', 'link', 0, 'manual', 1,
   'sample-gallery', 'sample-photo-01', 1, 0, 0,
   '${ACCESS_TOKEN}', '${GUEST_USERNAME}', '${guestPasswordHash()}', ${now});
 INSERT INTO event_collections (id, album_id, name, description, created_at) VALUES
@@ -157,7 +163,9 @@ function executeSql(sql, description) {
   const dir = mkdtempSync(join(tmpdir(), "snap-hub-sample-"));
   try {
     const file = join(dir, "seed.sql");
-    writeFileSync(file, sql);
+    // Run the deletes+inserts atomically so a failed seed/reset never leaves a
+    // half-updated sample event behind.
+    writeFileSync(file, `BEGIN TRANSACTION;\n${sql}\nCOMMIT;\n`);
     runWrangler(
       ["d1", "execute", "DB", "--local", "--config", config, "--persist-to", persistTo, "--file", file],
       description,
@@ -199,8 +207,9 @@ console.log(`Sample gallery ready — seeded 1 live event with 7 photos + 2 vide
 
 The event uses link access, so no guest sign-in is needed. Guest credentials
 ${GUEST_USERNAME} / ${GUEST_PASSWORD} work if you switch access_mode to 'password'
-while testing. Guest uploads are enabled but will fail without Google Drive,
-which is expected — original bytes still come from Drive outside local dev.
+while testing. Guest uploads are disabled on purpose: the sample gallery is a
+browse-only fixture, so reseeding or resetting can never mix in real uploads or
+leave orphaned files behind in Google Drive.
 
 Reset:  npm run sample:gallery:reset   (removes only the sample event)
         delete .wrangler/state         (wipes ALL local D1 data)`);

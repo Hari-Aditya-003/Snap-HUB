@@ -89,7 +89,7 @@ npm run dev              # then open http://127.0.0.1:5173/g/sample-gallery-toke
                          # (friendly URL: /e/sample-gallery)
 ```
 
-The event is live with link access, so no sign-in is needed. It contains 7 generated photos and 2 generated videos across 3 collections, with captions, highlights, a cover photo, and one uncategorized item.
+The event is live with link access, so no sign-in is needed. It contains 7 generated photos and 2 generated videos across 3 collections, with captions, highlights, a cover photo, and one uncategorized item. Guest uploads are intentionally disabled: the sample gallery is browse-only, so reseeding or resetting it can never mix in real uploads or leave orphaned files in Google Drive.
 
 The command is strictly local: it requires `--local`, rejects remote arguments, and never needs OAuth secrets. If `.dev.vars` is missing it is created with throwaway local credentials. Seeded media rows use reserved `sample:` object keys; the dev server synthesizes their bytes on the fly (see `lib/sample-media.ts`) only when `SAMPLE_MEDIA=1` is set in `.dev.vars` **and** the request is localhost. The deployed Worker has neither, so production always streams originals from Google Drive.
 
