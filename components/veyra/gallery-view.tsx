@@ -7,7 +7,9 @@ import {
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import Link from "next/link";
-import { filterUnsentFiles, mediaUploadKey } from "@/lib/uploads";
+import {
+  countSavedUploads, describeNames, describeRejected, filterUnsentFiles, UPLOAD_TIMEOUT_MS,
+} from "@/lib/uploads";
 
 type GalleryMedia = {
   id: string; filename: string; contentType: string; caption: string; isFeatured: boolean;
@@ -34,9 +36,8 @@ type UploadResult = {
   error?: string;
 };
 
-function describeRejected(rejected: Array<{ filename: string; reason: string }>) {
-  const shown = rejected.slice(0, 3).map((item) => `${item.filename} (${item.reason})`).join(", ");
-  return rejected.length > 3 ? `${shown} +${rejected.length - 3} more` : shown;
+function filenamesOf(photos: UploadPhotoResult[]) {
+  return describeNames(photos.map((photo) => photo.filename));
 }
 
 export function GalleryView({ album, token, media: initialMedia, collections }: GalleryViewProps) {
@@ -79,21 +80,19 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     });
   }
   async function refreshMedia() {
-    const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
-    if (!response.ok) return;
-    const data = await response.json() as { media: GalleryMedia[] };
-    setMedia(data.media);
+    try {
+      const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
+      if (!response.ok) return false;
+      const data = await response.json() as { media: GalleryMedia[] };
+      setMedia(data.media);
+      return true;
+    } catch {
+      return false;
+    }
   }
   function rememberSaved(photos?: UploadPhotoResult[]) {
     if (!photos?.length) return;
-    setSavedUploads((current) => {
-      const next = new Map(current);
-      for (const photo of photos) {
-        const key = mediaUploadKey(photo.filename, photo.size);
-        next.set(key, (next.get(key) ?? 0) + 1);
-      }
-      return next;
-    });
+    setSavedUploads((current) => countSavedUploads(current, photos));
   }
   function closeUploadPanel() {
     setUploadOpen(false);
@@ -126,38 +125,51 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     let response: Response | null = null;
     let data: UploadResult | null = null;
     try {
-      response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body });
+      response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
       data = await response.json().catch(() => null) as UploadResult | null;
-    } catch {
-      toast.error("The upload did not reach the server — check your connection and try again. Your selections are kept.");
+    } catch (error) {
+      toast.error(error instanceof Error && error.name === "TimeoutError"
+        ? "The upload took too long — check your connection and try again. Your selections are kept."
+        : "The upload did not reach the server — check your connection and try again. Your selections are kept.");
     } finally {
       setUploading(false);
     }
     if (!response) return;
 
-    const rejected = data?.rejected ?? [];
-    const savedCount = data?.photos?.length ?? 0;
-    rememberSaved(data?.photos);
+    const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+    const savedPhotos = Array.isArray(data?.photos) ? data.photos : [];
+    rememberSaved(savedPhotos);
 
     if (!response.ok) {
       const detail = describeRejected(rejected);
       toast.error(`${data?.error ?? "Upload failed — please try again"}${detail ? ` — ${detail}` : ""}`);
-      if (savedCount) {
-        toast.info(`${savedCount} ${savedCount === 1 ? "memory was" : "memories were"} saved before the error — they will be skipped if you send again`);
+      if (savedPhotos.length) {
+        toast.info(`${filenamesOf(savedPhotos)} — saved before the error and will be skipped if you send again`);
+        if (savedPhotos.some((photo) => photo.moderationStatus === "approved") && !(await refreshMedia())) {
+          toast.info("The new memories are saved — reload the page to see them");
+        }
       }
       return;
     }
 
-    if (data?.moderationStatus === "approved") await refreshMedia().catch(() => undefined);
+    if (!data || !savedPhotos.length) {
+      toast.error("The server sent an unexpected response — try again. Your selections are kept.");
+      return;
+    }
+
+    let refreshFailed = false;
+    if (data.moderationStatus === "approved") refreshFailed = !(await refreshMedia());
 
     if (rejected.length) {
-      toast.warning(`${savedCount} ${savedCount === 1 ? "memory" : "memories"} saved — ${describeRejected(rejected)}. Fix those files and send again.`);
+      toast.warning(`${filenamesOf(savedPhotos)} saved — ${describeRejected(rejected)}. Fix those files and send again.`);
+      if (refreshFailed) toast.info("Saved — but the gallery couldn't refresh. Reload the page to see your new memories.");
       return;
     }
 
     form.reset();
     setSavedUploads(new Map());
-    toast.success(data?.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
+    toast.success(data.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
+    if (refreshFailed) toast.info("Saved — but the gallery couldn't refresh. Reload the page to see your new memories.");
     setUploadOpen(false);
   }
 

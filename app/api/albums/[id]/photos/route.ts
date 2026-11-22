@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getAlbumById } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { isAdmin } from "@/lib/security";
-import { findRecentUpload, mediaUploadKey, parseKnownSaved, splitMediaFiles } from "@/lib/uploads";
+import { parseKnownSaved, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -30,25 +30,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     return NextResponse.json({ error: "Files must be photos or videos under 75 MB", rejected }, { status: 400 });
   }
 
-  const created: Array<Record<string, unknown>> = [];
-  // Per-key upload positions, starting from the saves the browser already knows
-  // about, so retried files are matched against distinct previously saved rows.
-  const positions = parseKnownSaved(form.get("knownSaved"));
+  const outcome: UploadOutcome = { photos: [], inserted: 0 };
   try {
     const folders = await ensureEventDriveFolders(album);
-    for (const file of accepted) {
-      // A retry of an upload that already committed — but whose response never
-      // reached the host — is reported as saved instead of inserted twice.
-      const key = mediaUploadKey(file.name, file.size);
-      const position = positions.get(key) ?? 0;
-      positions.set(key, position + 1);
-      const recent = await findRecentUpload(env.DB, {
-        albumId, filename: file.name, size: file.size, uploaderName: "Host", source: "host",
-      }, position);
-      if (recent) {
-        created.push({ id: recent.id, filename: file.name, size: file.size });
-        continue;
-      }
+    await saveMediaFiles(env.DB, accepted, {
+      albumId, uploaderName: "Host", source: "host",
+    }, parseKnownSaved(form.get("knownSaved")), async (file) => {
       const photoId = crypto.randomUUID();
       const folderId = file.type.startsWith("video/") ? folders.videosFolderId : folders.photosFolderId;
       const uploaded = await uploadDriveMedia(file, folderId, { albumId, photoId, source: "host" });
@@ -62,12 +49,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         await deleteDriveFile(uploaded.id).catch(() => undefined);
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
-      created.push({ id: photoId, filename: file.name, size: file.size });
-    }
+      return { id: photoId, moderationStatus: "approved" };
+    }, outcome);
   } catch (error) {
     const message = error instanceof GoogleDriveError ? error.message : "Google Drive upload failed.";
     const status = error instanceof GoogleDriveError ? error.status : 502;
-    return NextResponse.json({ error: message, photos: created, rejected }, { status });
+    return NextResponse.json({ error: message, photos: outcome.photos, rejected }, { status });
   }
-  return NextResponse.json({ photos: created, rejected });
+  return NextResponse.json({ photos: outcome.photos, rejected });
 }

@@ -13,6 +13,9 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  countSavedUploads, describeNames, describeRejected, filterUnsentFiles, UPLOAD_TIMEOUT_MS,
+} from "@/lib/uploads";
 
 type Album = {
   id: string; title: string; event_type: string; event_date: string; description: string;
@@ -37,6 +40,11 @@ type QrMode = "gallery" | "upload" | "slideshow";
 type DriveStatus = {
   configured: boolean; connected: boolean; email: string | null;
   rootFolderId: string | null; rootFolderUrl: string | null;
+};
+type UploadResult = {
+  photos?: Array<{ id: string; filename: string; size?: number; moderationStatus?: string }>;
+  rejected?: Array<{ filename: string; reason: string }>;
+  error?: string;
 };
 
 const eventTypes = ["Wedding", "Engagement", "Haldi", "Mehendi", "Sangeet", "Reception", "Birthday", "Anniversary", "Festival", "Graduation", "College event", "Corporate", "Conference", "Concert", "Party", "Reunion", "Trip", "Family gathering", "Photography event", "Other"];
@@ -63,6 +71,7 @@ export function AdminDashboard() {
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [qrMode, setQrMode] = useState<QrMode>("gallery");
   const [busy, setBusy] = useState(false);
+  const [savedUploads, setSavedUploads] = useState<Map<string, number>>(new Map());
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
   const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null });
 
@@ -164,11 +173,69 @@ export function AdminDashboard() {
   }
 
   async function upload(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selected) return; const formElement = event.currentTarget; setBusy(true);
-    const response = await fetch(`/api/albums/${selected.id}/photos`, { method: "POST", body: new FormData(formElement) });
-    const data = await response.json(); setBusy(false);
-    if (!response.ok) return toast.error(data.error ?? "Upload failed");
-    formElement.reset(); await load(); toast.success(`${data.photos.length} item${data.photos.length === 1 ? "" : "s"} added`);
+    event.preventDefault(); if (!selected) return;
+    const formElement = event.currentTarget;
+    const body = new FormData(formElement);
+    const picker = formElement.querySelector<HTMLInputElement>('input[name="photos"]');
+    const chosen = picker?.files ? [...picker.files] : [];
+    const filesToSend = filterUnsentFiles(chosen, savedUploads);
+    const alreadySaved = chosen.length - filesToSend.length;
+    if (alreadySaved) {
+      body.delete("photos");
+      for (const file of filesToSend) body.append("photos", file);
+      toast.info(`${alreadySaved} already uploaded — sending only the remaining ${filesToSend.length}`);
+    }
+    if (!filesToSend.length) {
+      toast.info(alreadySaved ? "Those files are already uploaded — choose different files" : "Choose at least one photo or video");
+      return;
+    }
+    if (savedUploads.size) body.set("knownSaved", JSON.stringify(Object.fromEntries(savedUploads)));
+
+    setBusy(true);
+    let response: Response | null = null;
+    let data: UploadResult | null = null;
+    try {
+      response = await fetch(`/api/albums/${selected.id}/photos`, { method: "POST", body, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+      data = await response.json().catch(() => null) as UploadResult | null;
+    } catch (error) {
+      toast.error(error instanceof Error && error.name === "TimeoutError"
+        ? "The upload took too long — check your connection and try again. Your selections are kept."
+        : "The upload did not reach the server — check your connection and try again. Your selections are kept.");
+    } finally {
+      setBusy(false);
+    }
+    if (!response) return;
+
+    const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+    const savedPhotos = Array.isArray(data?.photos) ? data.photos : [];
+    if (savedPhotos.length) setSavedUploads((current) => countSavedUploads(current, savedPhotos));
+
+    if (!response.ok) {
+      const detail = describeRejected(rejected);
+      toast.error(`${data?.error ?? "Upload failed"}${detail ? ` — ${detail}` : ""}`);
+      if (savedPhotos.length) {
+        toast.info(`${describeNames(savedPhotos.map((photo) => photo.filename))} — saved before the error and will be skipped if you retry`);
+        await load().catch(() => undefined);
+      }
+      return;
+    }
+
+    if (!data || !savedPhotos.length) {
+      toast.error("The server sent an unexpected response — try again. Your selections are kept.");
+      return;
+    }
+
+    const refreshed = await load().then(() => true).catch(() => false);
+    if (rejected.length) {
+      toast.warning(`${describeNames(savedPhotos.map((photo) => photo.filename))} added — ${describeRejected(rejected)}. Fix those files and upload again.`);
+      if (!refreshed) toast.info("Uploaded — but the event library couldn't refresh. Reload the page to see the new items.");
+      return;
+    }
+
+    formElement.reset();
+    setSavedUploads(new Map());
+    toast.success(`${savedPhotos.length} item${savedPhotos.length === 1 ? "" : "s"} added`);
+    if (!refreshed) toast.info("Uploaded — but the event library couldn't refresh. Reload the page to see the new items.");
   }
 
   async function saveEvent(patch?: Partial<Album>) {

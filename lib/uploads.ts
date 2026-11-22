@@ -47,6 +47,28 @@ export function mediaUploadKey(name: string, size?: number) {
   return `${name}:${size ?? ""}`;
 }
 
+// Uploads may carry up to ~100 MB over a guest's mobile connection; a bounded
+// wait keeps a silently dropped connection from disabling the form forever.
+export const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+
+export function countSavedUploads(current: ReadonlyMap<string, number>, photos: Array<{ filename: string; size?: number }>) {
+  const next = new Map(current);
+  for (const photo of photos) {
+    const key = mediaUploadKey(photo.filename, photo.size);
+    next.set(key, (next.get(key) ?? 0) + 1);
+  }
+  return next;
+}
+
+export function describeNames(names: string[], max = 3) {
+  const shown = names.slice(0, max).join(", ");
+  return names.length > max ? `${shown} +${names.length - max} more` : shown;
+}
+
+export function describeRejected(rejected: MediaRejection[], max = 3) {
+  return describeNames(rejected.map((item) => `${item.filename} (${item.reason})`), max);
+}
+
 // Removes up to `savedCounts[key]` files per upload key, in order — a batch
 // may hold distinct files that share a name and size, and only the ones the
 // server confirmed should be skipped on retry.
@@ -79,6 +101,39 @@ export async function findRecentUpload(db: D1Database, match: RecentUploadMatch,
   ).bind(match.albumId, match.filename, match.size, match.uploaderName, match.source,
     Date.now() - UPLOAD_RETRY_WINDOW_MS, position).first<{ id: string; moderation_status: string }>();
   return row ? { id: row.id, moderationStatus: row.moderation_status } : null;
+}
+
+export type SavedUploadPhoto = { id: string; filename: string; size: number; moderationStatus: string };
+export type UploadOutcome = { photos: SavedUploadPhoto[]; inserted: number };
+
+// Shared per-file save flow for the guest and host upload routes. Each file is
+// matched against prior rows at its upload position and reported as already
+// saved when a retry covers it; the rest go through `save` (Drive upload plus
+// photo insert). `outcome` is caller-owned so files saved before a mid-batch
+// failure are still visible to the error path.
+export async function saveMediaFiles(
+  db: D1Database,
+  files: File[],
+  match: { albumId: string; uploaderName: string; source: "guest" | "host" },
+  knownSaved: ReadonlyMap<string, number>,
+  save: (file: File) => Promise<{ id: string; moderationStatus: string }>,
+  outcome: UploadOutcome = { photos: [], inserted: 0 },
+): Promise<UploadOutcome> {
+  const positions = new Map(knownSaved);
+  for (const file of files) {
+    const key = mediaUploadKey(file.name, file.size);
+    const position = positions.get(key) ?? 0;
+    positions.set(key, position + 1);
+    const recent = await findRecentUpload(db, { ...match, filename: file.name, size: file.size }, position);
+    if (recent) {
+      outcome.photos.push({ id: recent.id, filename: file.name, size: file.size, moderationStatus: recent.moderationStatus });
+      continue;
+    }
+    const saved = await save(file);
+    outcome.photos.push({ id: saved.id, filename: file.name, size: file.size, moderationStatus: saved.moderationStatus });
+    outcome.inserted += 1;
+  }
+  return outcome;
 }
 
 export async function checkMediaFile(file: File): Promise<{ ok: true } | { ok: false; reason: string }> {
