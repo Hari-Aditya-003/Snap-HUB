@@ -38,6 +38,14 @@ type DriveStatus = {
   configured: boolean; connected: boolean; email: string | null;
   rootFolderId: string | null; rootFolderUrl: string | null;
 };
+type ApiResult<T> = T & { error?: string };
+type AlbumsResponse = { albums: Album[]; photos: Media[]; collections: Collection[] };
+type AlbumCreatedResponse = { album: Album; collection: Collection };
+type PhotosAddedResponse = { photos: Array<{ id: string; filename: string; size: number }> };
+type CollectionCreatedResponse = { collection: Collection };
+type MediaUpdateResponse = { caption: string; is_featured: number; moderation_status: Media["moderation_status"] };
+type SlideshowResponse = { playing: boolean; position: number; updatedAt: number };
+type GuestCredentialsResponse = { guestUsername: string; guestPassword: string };
 
 const eventTypes = ["Wedding", "Engagement", "Haldi", "Mehendi", "Sangeet", "Reception", "Birthday", "Anniversary", "Festival", "Graduation", "College event", "Corporate", "Conference", "Concert", "Party", "Reunion", "Trip", "Family gathering", "Photography event", "Other"];
 const themes = [
@@ -81,9 +89,9 @@ export function AdminDashboard() {
       fetch("/api/albums", { cache: "no-store" }),
       fetch("/api/admin/google-drive/status", { cache: "no-store" }),
     ]);
-    if (driveResponse.ok) setDriveStatus(await driveResponse.json());
+    if (driveResponse.ok) setDriveStatus((await driveResponse.json()) as DriveStatus);
     if (!response.ok) return;
-    const data = await response.json();
+    const data = (await response.json()) as AlbumsResponse;
     setAlbums(data.albums); setMedia(data.photos); setCollections(data.collections);
     setCaptionDrafts(Object.fromEntries(data.photos.map((item: Media) => [item.id, item.caption ?? ""])));
     setSelectedId((current) => current ?? data.albums[0]?.id ?? null);
@@ -112,7 +120,7 @@ export function AdminDashboard() {
         async execute() {
           const response = await fetch("/api/albums", { cache: "no-store" });
           if (!response.ok) throw new Error("Could not load events");
-          const data = await response.json();
+          const data = (await response.json()) as AlbumsResponse;
           return { events: data.albums.map((album: Album) => ({ id: album.id, title: album.title, eventType: album.event_type, status: album.status, mediaCount: album.media_count })) };
         },
       }, { signal: lifecycle.signal });
@@ -128,7 +136,7 @@ export function AdminDashboard() {
           const value = input as { title?: string; eventType?: string };
           if (!value.title?.trim()) throw new Error("Event title is required");
           const response = await fetch("/api/albums", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
-          const data = await response.json();
+          const data = (await response.json()) as ApiResult<AlbumCreatedResponse>;
           if (!response.ok) throw new Error(data.error ?? "Could not create event");
           await load(); setSelectedId(data.album.id);
           return { id: data.album.id, title: data.album.title, status: data.album.status, guestId: data.album.guest_username, guestPassword: data.album.guest_password };
@@ -156,7 +164,7 @@ export function AdminDashboard() {
     const response = await fetch("/api/albums", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
       title: form.get("title"), eventType: form.get("eventType"), tagline: form.get("tagline"),
     }) });
-    const data = await response.json(); setBusy(false);
+    const data = (await response.json()) as ApiResult<AlbumCreatedResponse>; setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Could not create the event");
     setAlbums((current) => [data.album, ...current]); setCollections((current) => [...current, data.collection]);
     setSelectedId(data.album.id); event.currentTarget.reset();
@@ -166,7 +174,7 @@ export function AdminDashboard() {
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selected) return; const formElement = event.currentTarget; setBusy(true);
     const response = await fetch(`/api/albums/${selected.id}/photos`, { method: "POST", body: new FormData(formElement) });
-    const data = await response.json(); setBusy(false);
+    const data = (await response.json()) as ApiResult<PhotosAddedResponse>; setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Upload failed");
     formElement.reset(); await load(); toast.success(`${data.photos.length} item${data.photos.length === 1 ? "" : "s"} added`);
   }
@@ -180,7 +188,7 @@ export function AdminDashboard() {
       allowGuestUploads: Boolean(next.allow_guest_uploads), moderationMode: next.moderation_mode,
       downloadsEnabled: Boolean(next.downloads_enabled), coverPhotoId: next.cover_photo_id,
     }) });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<Partial<Album>>;
     if (!response.ok) return toast.error(data.error ?? "Could not save event settings");
     updateSelected({ ...patch, ...data }); toast.success(next.status === "live" && selected.status !== "live" ? "Event published — the QR is live" : "Event settings saved");
   }
@@ -188,14 +196,14 @@ export function AdminDashboard() {
   async function createCollection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selected) return; const form = event.currentTarget; const data = new FormData(form);
     const response = await fetch(`/api/albums/${selected.id}/collections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: data.get("name") }) });
-    const result = await response.json(); if (!response.ok) return toast.error(result.error ?? "Could not create album");
+    const result = (await response.json()) as ApiResult<CollectionCreatedResponse>; if (!response.ok) return toast.error(result.error ?? "Could not create album");
     setCollections((current) => [...current, result.collection]); form.reset(); toast.success("Album added");
   }
 
   async function updateMedia(item: Media, patch: { caption?: string; isFeatured?: boolean; moderationStatus?: string }) {
     const response = await fetch(`/api/photos/${item.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
     if (!response.ok) return toast.error("Could not update this memory");
-    const data = await response.json();
+    const data = (await response.json()) as MediaUpdateResponse;
     setMedia((current) => current.map((value) => value.id === item.id ? { ...value, caption: data.caption, is_featured: data.is_featured, moderation_status: data.moderation_status } : value));
     toast.success(patch.moderationStatus === "approved" ? "Memory approved" : patch.moderationStatus === "rejected" ? "Memory hidden" : patch.isFeatured !== undefined ? (patch.isFeatured ? "Added to highlights" : "Removed from highlights") : "Caption saved");
   }
@@ -205,7 +213,7 @@ export function AdminDashboard() {
     const response = await fetch(`/api/albums/${selected.id}/slideshow`, {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
     });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<SlideshowResponse>;
     if (!response.ok) return toast.error(data.error ?? "Could not update the live slideshow");
     updateSelected({
       slideshow_playing: Number(data.playing),
@@ -218,7 +226,7 @@ export function AdminDashboard() {
     if (!selected) return;
     setBusy(true);
     const response = await fetch(`/api/albums/${selected.id}/credentials`, { method: "POST" });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<GuestCredentialsResponse>;
     setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Could not generate a new guest login");
     updateSelected({ guest_username: data.guestUsername, guest_password: data.guestPassword });
@@ -233,7 +241,7 @@ export function AdminDashboard() {
     if (!selected) return;
     setBusy(true);
     const response = await fetch(`/api/albums/${selected.id}`, { method: "DELETE" });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<{ deletedMedia: number }>;
     setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Could not delete this event");
     setAlbums((current) => current.filter((album) => album.id !== selected.id));

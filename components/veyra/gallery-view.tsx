@@ -74,7 +74,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const form = event.currentTarget;
     setUploading(true);
     const response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body: new FormData(form) });
-    const data = await response.json();
+    const data = (await response.json()) as { moderationStatus?: string; error?: string };
     setUploading(false);
     if (!response.ok) return toast.error(data.error ?? "Upload failed");
     form.reset();

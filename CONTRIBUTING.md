@@ -27,10 +27,11 @@ Follow the [local setup](README.md#local-web-development) to run the web app. Fr
 ```bash
 npm ci
 npm run lint
+npm run typecheck
 npm test
 ```
 
-`npm test` builds the Worker and runs its integration suite with a temporary local D1 database. Describe manual checks for affected host and guest flows. For iOS changes, include the Xcode version, device or simulator, and iOS version you checked. Schema changes must include generated, reviewed Drizzle migrations.
+`npm run typecheck` runs `tsc --noEmit` across the app, scripts, and tests; pull requests run it with lint before the test suite. `npm test` builds the Worker and runs its integration suite with a temporary local D1 database. Describe manual checks for affected host and guest flows. For iOS changes, include the Xcode version, device or simulator, and iOS version you checked. Schema changes must include generated, reviewed Drizzle migrations.
 
 Use synthetic event media and your own OAuth test project for Drive checks. Follow the [deployment guide](docs/DEPLOYMENT.md) to set up a separate Worker and D1 database for a fork.
 
