@@ -2,6 +2,7 @@ import "server-only";
 
 import { env } from "cloudflare:workers";
 import type { AlbumRecord } from "@/lib/data";
+import { sampleMediaResponse } from "@/lib/sample-media";
 import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
@@ -382,6 +383,11 @@ export async function driveMediaResponse(fileId: string, request: Request, optio
   download?: boolean;
   cacheControl?: string;
 }) {
+  // Reserved "sample:" keys are local-dev fixtures (`npm run sample:gallery`).
+  // They can never be real Drive IDs, so nothing else changes: deployed and
+  // non-local requests still stream originals from Google Drive below.
+  const sample = await sampleMediaResponse(fileId, request, options);
+  if (sample) return sample;
   const token = await accessToken();
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   const range = request.headers.get("range");
