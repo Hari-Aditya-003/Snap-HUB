@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 
 // lib/google-drive-grant.ts is plain TypeScript without Worker bindings, so
 // `node --test` can import it directly. Node >= 22.18 strips type annotations
@@ -69,9 +70,12 @@ test("a stalled token endpoint reports unverified once the probe timeout fires",
     ...OPTIONS,
     timeoutMs: 25,
     onFailure: (failure) => failures.push(failure),
-    fetchImpl: (_url, init) => new Promise((_, reject) => {
-      init.signal.addEventListener("abort", () => reject(init.signal.reason));
-    }),
+    fetchImpl: async (_url, init) => {
+      // Simulate a network operation with a live handle. AbortSignal.timeout
+      // alone uses an unreferenced timer, which cannot keep a Node 22 test alive.
+      await wait(1000, undefined, { signal: init.signal });
+      return tokenResponse(200, { access_token: "probe-should-time-out-first" });
+    },
   });
   assert.deepEqual(result, { outcome: "unverified" });
   assert.deepEqual(failures, [{ category: "network" }]);
