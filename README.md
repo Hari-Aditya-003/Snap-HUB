@@ -94,6 +94,29 @@ npm run dev
 
 Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.dev.vars`. The development server starts on <http://127.0.0.1:5173>. You can open the homepage, sign in at `/admin`, and run the automated checks with local D1 and no Cloudflare or Google account. Creating events and uploading media require connecting your own [Google Drive OAuth client](docs/DEPLOYMENT.md#google-drive-setup).
 
+### Sample gallery without Google Drive
+
+To review the guest gallery — filters, search, captions, favorites, collections, and the media viewer — without any credentials, seed a disposable sample event into local D1:
+
+```bash
+npm run sample:gallery   # applies local migrations + inserts the sample event
+npm run dev              # then open http://127.0.0.1:5173/g/sample-gallery-token
+                         # (friendly URL: /e/sample-gallery)
+```
+
+The event is live with link access, so no sign-in is needed. It contains 7 generated photos and 2 generated videos across 3 collections, with captions, highlights, a cover photo, and one uncategorized item. Guest uploads are intentionally disabled: the sample gallery is browse-only, so reseeding or resetting it can never mix in real uploads or leave orphaned files in Google Drive.
+
+The command is strictly local: it requires `--local`, rejects remote arguments, and never needs OAuth secrets. If `.dev.vars` is missing it is created with throwaway local credentials. Seeded media rows use reserved `sample:` object keys; the dev server synthesizes their bytes on the fly (see `lib/sample-media.ts`) only when `SAMPLE_MEDIA=1` is set in `.dev.vars` **and** the request is localhost. The deployed Worker has neither, so production always streams originals from Google Drive.
+
+Reset options:
+
+```bash
+npm run sample:gallery:reset   # removes only the sample event
+rm -rf .wrangler/state         # wipes ALL local D1 data; re-run db:migrate:local after
+```
+
+To verify a normal build still takes the Drive path for originals: run `npm run build` and start the Worker without `SAMPLE_MEDIA` in `.dev.vars` (or set `SAMPLE_MEDIA=0`). Requests to `sample:` object keys then return 404 instead of synthesized bytes — the dev-only branch in `lib/sample-media.ts` is gated off — and media for real events continues to resolve through their stored Google Drive file IDs.
+
 Useful checks:
 
 ```bash

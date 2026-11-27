@@ -9,6 +9,7 @@ import {
   failedGrantError,
   type StoredDriveGrant,
 } from "@/lib/google-drive-grant";
+import { SAMPLE_OBJECT_PREFIX, sampleMediaResponse } from "@/lib/sample-media";
 import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
@@ -291,6 +292,9 @@ export async function getGoogleDriveStatus() {
 
 export async function deleteDriveFile(fileId: string | null | undefined) {
   if (!fileId) return;
+  // Reserved "sample:" keys are local-dev fixtures, never real Drive file IDs —
+  // deleting the seeded D1 row must not touch (or require) Google Drive.
+  if (fileId.startsWith(SAMPLE_OBJECT_PREFIX)) return;
   const token = await accessToken();
   const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: "DELETE",
@@ -408,6 +412,11 @@ export async function driveMediaResponse(fileId: string, request: Request, optio
   download?: boolean;
   cacheControl?: string;
 }) {
+  // Reserved "sample:" keys are local-dev fixtures (`npm run sample:gallery`).
+  // They can never be real Drive IDs, so nothing else changes: deployed and
+  // non-local requests still stream originals from Google Drive below.
+  const sample = await sampleMediaResponse(fileId, request, options);
+  if (sample) return sample;
   const token = await accessToken();
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
   const range = request.headers.get("range");
