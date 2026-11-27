@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft, ChevronRight, Download, Film, Heart, Image as ImageIcon,
   ImageUp, Maximize2, Play, Search, Sparkles, Star, Upload, X,
@@ -51,6 +51,65 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const text = `${item.filename} ${item.caption} ${item.collectionName ?? ""}`.toLowerCase();
     return kindMatch && collectionMatch && text.includes(query.toLowerCase().trim());
   }), [collectionId, favorites, filter, media, query]);
+  const filteredRef = useRef(filtered);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const viewerOpen = viewerIndex !== null && filtered[viewerIndex] !== undefined;
+
+  useEffect(() => { filteredRef.current = filtered; }, [filtered]);
+
+  useEffect(() => {
+    if (!viewerOpen) return;
+    const dialog = viewerRef.current;
+    dialog?.querySelector<HTMLElement>(".close-show")?.focus({ preventScroll: true });
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setViewerIndex(null);
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusables = dialog ? Array.from(dialog.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), a[href], video[controls], [tabindex]:not([tabindex=\"-1\"])",
+        )) : [];
+        if (!focusables.length || !dialog) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (document.activeElement === dialog) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey ? document.activeElement === first : document.activeElement === last) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (!dialog.contains(document.activeElement)) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("video, input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        setViewerIndex((value) => value === null ? 0 : (value + direction + filteredRef.current.length) % filteredRef.current.length);
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        setViewerIndex(event.key === "Home" ? 0 : filteredRef.current.length - 1);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (openerRef.current?.isConnected) openerRef.current.focus();
+      else document.querySelector<HTMLElement>(".memory-open, .filter-tabs button")?.focus();
+      openerRef.current = null;
+    };
+  }, [viewerOpen]);
 
   function move(direction: number) {
     setViewerIndex((value) => value === null ? 0 : (value + direction + filtered.length) % filtered.length);
@@ -89,6 +148,10 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
 
   const active = viewerIndex === null ? null : filtered[viewerIndex];
   const src = (item: GalleryMedia) => `/api/gallery/${token}/photos/${item.id}`;
+
+  useEffect(() => {
+    if (viewerIndex !== null && !active) queueMicrotask(() => setViewerIndex(null));
+  }, [active, viewerIndex]);
 
   return (
     <main className={`memory-gallery theme-${album.theme}`}>
@@ -136,7 +199,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
         {filtered.map((item, index) => {
           const isVideo = item.contentType.startsWith("video/");
           return <article key={item.id} className="memory-card">
-            <button className="memory-open" onClick={() => setViewerIndex(index)} aria-label={`Open ${item.filename}`}>
+            <button className="memory-open" onClick={(event) => { openerRef.current = event.currentTarget; setViewerIndex(index); }} aria-label={`Open ${item.filename}`}>
               {isVideo ? <video src={src(item)} preload="metadata" muted playsInline /> : <img src={src(item)} alt={item.caption || item.filename} loading="lazy" decoding="async" />}
               <span className="expand-chip"><Maximize2 /> View</span>
               {isVideo && <span className="video-chip"><Play /> Video</span>}
@@ -150,7 +213,8 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
 
       <footer className="memory-footer"><strong>Snap HUB</strong><span>One QR · Every memory · No app needed</span></footer>
 
-      {active && <div className="slideshow" role="dialog" aria-modal="true" aria-label="Memory viewer">
+      {active && <div className="slideshow" role="dialog" aria-modal="true" aria-label="Memory viewer" ref={viewerRef} tabIndex={-1}>
+        <p className="sr-only" role="status">{`Memory ${(viewerIndex ?? 0) + 1} of ${filtered.length}: ${active.caption || active.filename}`}</p>
         <button className="close-show" onClick={() => setViewerIndex(null)} aria-label="Close viewer"><X /></button>
         <button className="slide-nav prev" onClick={() => move(-1)} aria-label="Previous memory"><ChevronLeft /></button>
         <div className="slide-stage">
