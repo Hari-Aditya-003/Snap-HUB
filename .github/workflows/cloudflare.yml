@@ -21,6 +21,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
       - run: npm test
       - name: Validate the deployable Worker bundle
         run: npx wrangler deploy --config dist/server/wrangler.json --dry-run

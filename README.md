@@ -98,6 +98,7 @@ Useful checks:
 
 ```bash
 npm run lint
+npm run typecheck
 npm test
 npm run deploy:check
 npm audit --omit=dev
