@@ -2,6 +2,13 @@ import "server-only";
 
 import { env } from "cloudflare:workers";
 import type { AlbumRecord } from "@/lib/data";
+import {
+  checkDriveRefreshGrant,
+  createDriveGrantHealth,
+  driveConnectionStatus,
+  failedGrantError,
+  type StoredDriveGrant,
+} from "@/lib/google-drive-grant";
 import { getSessionSecret } from "@/lib/security";
 
 const encoder = new TextEncoder();
@@ -28,7 +35,18 @@ type DriveTokenResponse = {
 
 type DriveFile = { id: string; name?: string; size?: string; mimeType?: string };
 
-let accessTokenCache: { token: string; expiresAt: number; connectionUpdatedAt: number } | null = null;
+// The grant-health checker owns the shared access-token cache. `verify`
+// always exercises the stored refresh grant (the status path), while
+// `accessTokenHealth` may reuse a still-fresh minted token for real Drive API
+// calls — the refresh path recovers when a cached token dies early.
+const grantHealth = createDriveGrantHealth({
+  checkGrant: (refreshToken) =>
+    checkDriveRefreshGrant({
+      clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET,
+      refreshToken,
+    }),
+});
 
 export class GoogleDriveError extends Error {
   constructor(message: string, public readonly status = 502) {
@@ -162,34 +180,27 @@ async function getConnectionRow() {
   ).bind(CONNECTION_ID).first<DriveConnectionRow>();
 }
 
+// Wraps a connection row for the grant-health checker. A stored refresh token
+// that can no longer be decrypted (for example after SESSION_SECRET changed)
+// reports "expired" because only reconnecting can repair it; transient
+// token-endpoint failures report "unverified" instead.
+function storedGrant(connection: DriveConnectionRow): StoredDriveGrant {
+  return {
+    connectionUpdatedAt: connection.updated_at,
+    decryptRefreshToken: () => decryptRefreshToken(connection.encrypted_refresh_token),
+  };
+}
+
 async function accessToken() {
   if (!googleDriveConfigured()) throw new GoogleDriveError("Google Drive OAuth is not configured.", 503);
   const connection = await getConnectionRow();
   if (!connection) throw new GoogleDriveError("Connect Google Drive from the host dashboard first.", 503);
-  if (accessTokenCache && accessTokenCache.connectionUpdatedAt === connection.updated_at && accessTokenCache.expiresAt > Date.now() + 60_000) {
-    return accessTokenCache.token;
+  const grant = await grantHealth.accessTokenHealth(storedGrant(connection));
+  if (grant.outcome !== "healthy") {
+    const failure = failedGrantError(grant);
+    throw new GoogleDriveError(failure.message, failure.status);
   }
-  const refreshToken = await decryptRefreshToken(connection.encrypted_refresh_token);
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: refreshToken,
-      grant_type: "refresh_token",
-    }),
-  });
-  const token = await response.json() as DriveTokenResponse;
-  if (!response.ok || !token.access_token) {
-    throw new GoogleDriveError("Google Drive authorization expired. Connect it again from the host dashboard.", 503);
-  }
-  accessTokenCache = {
-    token: token.access_token,
-    expiresAt: Date.now() + Math.max(300, token.expires_in ?? 3600) * 1000,
-    connectionUpdatedAt: connection.updated_at,
-  };
-  return token.access_token;
+  return grant.accessToken;
 }
 
 async function driveJson<T>(url: string, init: RequestInit = {}, suppliedAccessToken?: string) {
@@ -235,6 +246,13 @@ async function findOrCreateRootFolder(token: string) {
 }
 
 export async function saveGoogleDriveConnection(refreshToken: string, accessTokenValue: string, email: string) {
+  const previous = await getConnectionRow();
+  // Reconnecting with a *different* Google account swaps which Drive owns the
+  // root folder, but every album keeps the folder IDs created under the
+  // previous account — those folders stay unreachable from the new account.
+  // Detection + a dashboard warning is the pragmatic guard; migrating folder
+  // IDs is deliberately out of scope.
+  const accountChanged = Boolean(previous && previous.email.toLowerCase() !== email.toLowerCase());
   const rootFolderId = await findOrCreateRootFolder(accessTokenValue);
   const encryptedRefreshToken = await encryptRefreshToken(refreshToken);
   const now = Date.now();
@@ -244,8 +262,8 @@ export async function saveGoogleDriveConnection(refreshToken: string, accessToke
      ON CONFLICT(id) DO UPDATE SET encrypted_refresh_token = excluded.encrypted_refresh_token,
        email = excluded.email, root_folder_id = excluded.root_folder_id, updated_at = excluded.updated_at`,
   ).bind(CONNECTION_ID, encryptedRefreshToken, email, rootFolderId, now, now).run();
-  accessTokenCache = { token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now };
-  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId) };
+  grantHealth.seedCache({ token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now });
+  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId), previousEmail: previous?.email ?? null, accountChanged };
 }
 
 export function driveFolderUrl(folderId: string) {
@@ -253,13 +271,21 @@ export function driveFolderUrl(folderId: string) {
 }
 
 export async function getGoogleDriveStatus() {
+  const configured = googleDriveConfigured();
   const connection = await getConnectionRow();
+  // Only probe the grant when a refresh can actually run: without the OAuth
+  // client settings the dashboard must show setup guidance instead. The probe
+  // always posts the stored refresh token to Google — a cached access token
+  // must not hide a grant that was revoked since the token was minted.
+  const grant = configured && connection ? await grantHealth.verify(storedGrant(connection)) : null;
+  const status = driveConnectionStatus({
+    configured,
+    connection: connection ? { email: connection.email, rootFolderId: connection.root_folder_id } : null,
+    grant,
+  });
   return {
-    configured: googleDriveConfigured(),
-    connected: Boolean(connection),
-    email: connection?.email ?? null,
-    rootFolderId: connection?.root_folder_id ?? null,
-    rootFolderUrl: connection?.root_folder_id ? driveFolderUrl(connection.root_folder_id) : null,
+    ...status,
+    rootFolderUrl: status.rootFolderId ? driveFolderUrl(status.rootFolderId) : null,
   };
 }
 
