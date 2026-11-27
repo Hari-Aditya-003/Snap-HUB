@@ -45,6 +45,21 @@ Host credentials are runtime secrets and are never committed to the repository.
 - Responsive guest and host web experiences with installable PWA metadata
 - Native SwiftUI iPhone/iPad host shell with a configurable server origin
 
+## Supported photo and video uploads
+
+Hosts and guests share the same validation rules: each file is checked by MIME type, extension, and file signature before it reaches Google Drive.
+
+| Kind | Formats | Notes |
+| --- | --- | --- |
+| Photos | JPEG, PNG, WebP, GIF, HEIC, HEIF | `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.heic`, `.heif` |
+| Videos | MP4, MOV (QuickTime), WebM | `.mp4`, `.mov`, `.webm` |
+
+- **Per-file limit:** 75 MB (75 MiB).
+- **Per submission:** up to 20 files, and the whole batch may total up to 100 MB (100 MiB).
+- iPhone formats such as HEIC and MOV are accepted for upload. Successful upload does not guarantee in-browser playback — most browsers cannot display HEIC images, and MOV files may use codecs the browser cannot decode. MP4/H.264 has the broadest playback support.
+- A batch over the 20-file or 100 MB limits is rejected entirely. Within an accepted batch, files that fail type, signature, or size checks are skipped; the rest still upload.
+- Guest uploads additionally require the event to be live with guest uploads enabled, and are rate-limited to 8 submissions per 10 minutes per guest IP per event — rejected requests also consume that quota.
+
 ## Architecture
 
 - Next.js-compatible React application built with Vinext and Vite
