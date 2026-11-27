@@ -33,7 +33,7 @@ Host credentials are runtime secrets and are never committed to the repository.
 - Host authentication with signed, HTTP-only sessions and login rate limiting
 - Event creation for weddings, birthdays, festivals, graduations, corporate events, concerts, and other celebrations
 - Private guest links, generated or rotated guest IDs/passwords, and downloadable QR codes
-- Separate QR targets for the gallery, guest uploads, and live slideshow
+- Separate QR targets for the gallery, guest uploads, and live slideshow, with downloadable print signs
 - Photo and video uploads directly to the host's Google Drive
 - Collections, captions, event cover photos, themes, and welcome text
 - Guest uploads with manual or instant moderation
@@ -44,6 +44,21 @@ Host credentials are runtime secrets and are never committed to the repository.
 - Host-controlled live slideshow with previous, next, pause, resume, restart, and ambient music
 - Responsive guest and host web experiences with installable PWA metadata
 - Native SwiftUI iPhone/iPad host shell with a configurable server origin
+
+## Supported photo and video uploads
+
+Hosts and guests share the same validation rules: each file is checked by MIME type, extension, and file signature before it reaches Google Drive.
+
+| Kind | Formats | Notes |
+| --- | --- | --- |
+| Photos | JPEG, PNG, WebP, GIF, HEIC, HEIF | `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.heic`, `.heif` |
+| Videos | MP4, MOV (QuickTime), WebM | `.mp4`, `.mov`, `.webm` |
+
+- **Per-file limit:** 75 MB (75 MiB).
+- **Per submission:** up to 20 files, and the whole batch may total up to 100 MB (100 MiB).
+- iPhone formats such as HEIC and MOV are accepted for upload. Successful upload does not guarantee in-browser playback — most browsers cannot display HEIC images, and MOV files may use codecs the browser cannot decode. MP4/H.264 has the broadest playback support.
+- A batch over the 20-file or 100 MB limits is rejected entirely. Within an accepted batch, files that fail type, signature, or size checks are skipped; the rest still upload.
+- Guest uploads additionally require the event to be live with guest uploads enabled, and are rate-limited to 8 submissions per 10 minutes per guest IP per event — rejected requests also consume that quota.
 
 ## Architecture
 
@@ -79,10 +94,34 @@ npm run dev
 
 Set strong local values for `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `SESSION_SECRET` in `.dev.vars`. The development server starts on <http://127.0.0.1:5173>. You can open the homepage, sign in at `/admin`, and run the automated checks with local D1 and no Cloudflare or Google account. Creating events and uploading media require connecting your own [Google Drive OAuth client](docs/DEPLOYMENT.md#google-drive-setup).
 
+### Sample gallery without Google Drive
+
+To review the guest gallery — filters, search, captions, favorites, collections, and the media viewer — without any credentials, seed a disposable sample event into local D1:
+
+```bash
+npm run sample:gallery   # applies local migrations + inserts the sample event
+npm run dev              # then open http://127.0.0.1:5173/g/sample-gallery-token
+                         # (friendly URL: /e/sample-gallery)
+```
+
+The event is live with link access, so no sign-in is needed. It contains 7 generated photos and 2 generated videos across 3 collections, with captions, highlights, a cover photo, and one uncategorized item. Guest uploads are intentionally disabled: the sample gallery is browse-only, so reseeding or resetting it can never mix in real uploads or leave orphaned files in Google Drive.
+
+The command is strictly local: it requires `--local`, rejects remote arguments, and never needs OAuth secrets. If `.dev.vars` is missing it is created with throwaway local credentials. Seeded media rows use reserved `sample:` object keys; the dev server synthesizes their bytes on the fly (see `lib/sample-media.ts`) only when `SAMPLE_MEDIA=1` is set in `.dev.vars` **and** the request is localhost. The deployed Worker has neither, so production always streams originals from Google Drive.
+
+Reset options:
+
+```bash
+npm run sample:gallery:reset   # removes only the sample event
+rm -rf .wrangler/state         # wipes ALL local D1 data; re-run db:migrate:local after
+```
+
+To verify a normal build still takes the Drive path for originals: run `npm run build` and start the Worker without `SAMPLE_MEDIA` in `.dev.vars` (or set `SAMPLE_MEDIA=0`). Requests to `sample:` object keys then return 404 instead of synthesized bytes — the dev-only branch in `lib/sample-media.ts` is gated off — and media for real events continues to resolve through their stored Google Drive file IDs.
+
 Useful checks:
 
 ```bash
 npm run lint
+npm run typecheck
 npm test
 npm run deploy:check
 npm audit --omit=dev
@@ -90,7 +129,16 @@ npm audit --omit=dev
 
 Database migrations live in `drizzle/`. Local migrations use a local database; `npm run db:migrate:remote` explicitly applies them to your configured Cloudflare account. `npm test` builds the real Worker and checks its login, authorization, database access, and standalone artifact in an isolated local runtime.
 
-For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions repeats the dependency audit, lint, and production build on every push and pull request, while Dependabot monitors npm updates weekly.
+Browser smoke coverage lives in `tests/browser/` and drives a real Chromium window through the guest gallery and moderation: a guest opens an event link, browses media in the viewer, then uploads a photo that stays pending until the host approves it through the same PATCH endpoint the dashboard uses. The suite boots `wrangler dev` itself against a disposable local D1 database and enables `SNAP_HUB_FAKE_DRIVE`, a built-in fake adapter that only activates for loopback request URLs, so it never touches a Google account or the public internet.
+
+```bash
+npx playwright install --with-deps chromium   # one-time browser download
+npm run test:browser                          # builds the Worker, then runs the smoke spec
+```
+
+CI must install the browser before running the suite — the same `npx playwright install --with-deps chromium` command, which also fetches the system libraries Chromium needs on Linux.
+
+For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions runs lint, TypeScript, Worker integration, and browser checks for changes targeting the default branch. A separate workflow runs the production dependency audit.
 
 ## iOS build and installation
 

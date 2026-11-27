@@ -5,9 +5,7 @@ import { getAlbumByToken } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { canViewGallery } from "@/lib/security";
 import { isRateLimited } from "@/lib/rate-limit";
-import { hasValidMediaSignature } from "@/lib/uploads";
-
-const MAX_FILE_SIZE = 75 * 1024 * 1024;
+import { readUploadKeys, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
@@ -38,14 +36,21 @@ export async function POST(request: Request, context: { params: Promise<{ token:
     if (!collection) return NextResponse.json({ error: "That album is not part of this event" }, { status: 400 });
   }
 
+  const keys = readUploadKeys(form, files);
+  if (!keys) return NextResponse.json({ error: "Invalid upload identity" }, { status: 400 });
+  const { accepted, rejected } = await splitMediaFiles(files);
+  if (!accepted.length) {
+    return NextResponse.json({ error: "Files must be photos or videos under 75 MB", rejected }, { status: 400 });
+  }
+
   const moderationStatus = album.moderation_mode === "instant" ? "approved" : "pending";
-  const created: Array<{ id: string; filename: string; moderationStatus: string }> = [];
+  const outcome: UploadOutcome = { photos: [], inserted: 0 };
   try {
-    const folders = await ensureEventDriveFolders(album);
-    for (const file of files) {
-      if (!(await hasValidMediaSignature(file)) || file.size > MAX_FILE_SIZE) continue;
-      const photoId = crypto.randomUUID();
-      const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" });
+    const folders = await ensureEventDriveFolders(album, request);
+    await saveMediaFiles(env.DB, accepted, {
+      albumId: album.id, source: "guest",
+    }, keys, async (file, photoId) => {
+      const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" }, request);
       try {
         await env.DB.prepare(
           `INSERT INTO photos (id, album_id, object_key, filename, content_type, caption,
@@ -54,16 +59,18 @@ export async function POST(request: Request, context: { params: Promise<{ token:
         ).bind(photoId, album.id, uploaded.id, file.name, file.type, caption, collectionId,
           moderationStatus, uploaderName, file.size, Date.now()).run();
       } catch {
-        await deleteDriveFile(uploaded.id).catch(() => undefined);
+        await deleteDriveFile(uploaded.id, request).catch(() => undefined);
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
-      created.push({ id: photoId, filename: file.name, moderationStatus });
-    }
+      return moderationStatus;
+    }, outcome);
   } catch (error) {
+    // Photos that committed before the failure still count as guest uploads.
+    if (outcome.inserted) await recordEventMetric(album.id, "guest_uploads", outcome.inserted);
     const message = error instanceof GoogleDriveError ? error.message : "Google Drive upload failed.";
-    return NextResponse.json({ error: message }, { status: error instanceof GoogleDriveError ? error.status : 502 });
+    const status = error instanceof GoogleDriveError ? error.status : 502;
+    return NextResponse.json({ error: message, photos: outcome.photos, rejected }, { status });
   }
-  if (!created.length) return NextResponse.json({ error: "Files must be photos or videos under 75 MB" }, { status: 400 });
-  await recordEventMetric(album.id, "guest_uploads", created.length);
-  return NextResponse.json({ photos: created, moderationStatus });
+  if (outcome.inserted) await recordEventMetric(album.id, "guest_uploads", outcome.inserted);
+  return NextResponse.json({ photos: outcome.photos, rejected, moderationStatus });
 }

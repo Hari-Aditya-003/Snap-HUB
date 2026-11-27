@@ -1,18 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import { downloadQrSign } from "@/lib/qr-sign";
 import Link from "next/link";
+import { UploadSummary, type UploadFeedback } from "./upload-summary";
 import {
   BarChart3, CalendarDays, Check, ChevronLeft, ChevronRight, CircleCheck, Clock3, Copy, Download, ExternalLink, Eye, Film,
   FolderOpen, FolderPlus, HardDrive, ImagePlus, KeyRound, LogOut, Palette, Play, Plus, QrCode,
-  Pause, Save, Settings2, Sparkles, Star, Trash2, Upload, Wallpaper, X,
+  Pause, Save, Settings2, Sparkles, Star, Trash2, TriangleAlert, Upload, Wallpaper, X,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  describeNames, describeRejected, prepareUploads, UPLOAD_TIMEOUT_MS, type UploadSelection,
+} from "@/lib/uploads";
 
 type Album = {
   id: string; title: string; event_type: string; event_date: string; description: string;
@@ -37,7 +42,26 @@ type QrMode = "gallery" | "upload" | "slideshow";
 type DriveStatus = {
   configured: boolean; connected: boolean; email: string | null;
   rootFolderId: string | null; rootFolderUrl: string | null;
+  // "expired": stored grant is revoked/expired/undecryptable and must be
+  // reconnected. "misconfigured": Google rejected the Worker's OAuth client
+  // credentials — the host must fix them, reconnecting alone will not help.
+  // "unverified": the grant could not be checked right now.
+  reason: "expired" | "unverified" | "misconfigured" | null;
 };
+type ApiResult<T> = T & { error?: string };
+type AlbumsResponse = { albums: Album[]; photos: Media[]; collections: Collection[] };
+type AlbumCreatedResponse = { album: Album; collection: Collection };
+type CollectionCreatedResponse = { collection: Collection };
+type MediaUpdateResponse = { caption: string; is_featured: number; moderation_status: Media["moderation_status"] };
+type SlideshowResponse = { playing: boolean; position: number; updatedAt: number };
+type GuestCredentialsResponse = { guestUsername: string; guestPassword: string };
+type UploadResult = {
+  photos?: Array<{ id: string; filename: string; size?: number; moderationStatus?: string; uploadKey?: string }>;
+  rejected?: Array<{ filename: string; reason: string }>;
+  error?: string;
+};
+
+const GOOGLE_DRIVE_SETUP_GUIDE = "https://github.com/Hari-Aditya-003/Snap-HUB/blob/main/docs/DEPLOYMENT.md#google-drive-setup";
 
 const eventTypes = ["Wedding", "Engagement", "Haldi", "Mehendi", "Sangeet", "Reception", "Birthday", "Anniversary", "Festival", "Graduation", "College event", "Corporate", "Conference", "Concert", "Party", "Reunion", "Trip", "Family gathering", "Photography event", "Other"];
 const themes = [
@@ -60,16 +84,32 @@ export function AdminDashboard() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [origin] = useState(() => typeof window === "undefined" ? "" : window.location.origin);
-  const [qrDataUrl, setQrDataUrl] = useState("");
+  const [qrImage, setQrImage] = useState<{ target: string; dataUrl: string }>();
   const [qrMode, setQrMode] = useState<QrMode>("gallery");
   const [busy, setBusy] = useState(false);
+  const uploadSelection = useRef<UploadSelection | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<(UploadFeedback & { albumId: string }) | null>(null);
   const [captionDrafts, setCaptionDrafts] = useState<Record<string, string>>({});
-  const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null });
+  const [driveStatus, setDriveStatus] = useState<DriveStatus>({ configured: false, connected: false, email: null, rootFolderId: null, rootFolderUrl: null, reason: null });
+  const [driveProbe, setDriveProbe] = useState<"checking" | "failed" | "ready">("checking");
+  const [driveAccountMismatch, setDriveAccountMismatch] = useState(false);
+  const [copyFallback, setCopyFallback] = useState<{ label: string; value: string } | null>(null);
 
   const selected = albums.find((album) => album.id === selectedId) ?? albums[0];
   const selectedMedia = useMemo(() => media.filter((item) => item.album_id === selected?.id), [media, selected]);
   const selectedCollections = useMemo(() => collections.filter((item) => item.album_id === selected?.id), [collections, selected]);
   const pendingCount = selectedMedia.filter((item) => item.moderation_status === "pending").length;
+  const driveNeedsReconnect = driveStatus.connected && driveStatus.reason === "expired";
+  const driveMisconfigured = driveStatus.connected && driveStatus.reason === "misconfigured";
+  // A blocked grant means Drive-backed actions (create event, upload) will
+  // fail at the API anyway — keep them disabled until the problem is fixed.
+  const driveBlocked = driveNeedsReconnect || driveMisconfigured;
+  const driveUsable = driveProbe === "ready" && driveStatus.configured && driveStatus.connected && !driveBlocked;
+  const driveActionHint = driveProbe === "checking" ? "Checking Google Drive…"
+    : driveProbe === "failed" ? "Check Google Drive first"
+    : driveNeedsReconnect ? "Reconnect Google Drive first"
+    : driveMisconfigured ? "Fix the OAuth credentials first"
+    : "Connect Google Drive first";
   const totals = useMemo(() => ({
     media: albums.reduce((sum, album) => sum + Number(album.media_count), 0),
     storage: albums.reduce((sum, album) => sum + Number(album.storage_bytes), 0),
@@ -77,23 +117,43 @@ export function AdminDashboard() {
   }), [albums]);
 
   const load = useCallback(async () => {
-    const [response, driveResponse] = await Promise.all([
-      fetch("/api/albums", { cache: "no-store" }),
-      fetch("/api/admin/google-drive/status", { cache: "no-store" }),
-    ]);
-    if (driveResponse.ok) setDriveStatus(await driveResponse.json());
-    if (!response.ok) return;
-    const data = await response.json();
+    const response = await fetch("/api/albums", { cache: "no-store" });
+    if (!response.ok) throw new Error("Could not load events");
+    const data = (await response.json()) as AlbumsResponse;
     setAlbums(data.albums); setMedia(data.photos); setCollections(data.collections);
     setCaptionDrafts(Object.fromEntries(data.photos.map((item: Media) => [item.id, item.caption ?? ""])));
     setSelectedId((current) => current ?? data.albums[0]?.id ?? null);
   }, []);
+  const checkDrive = useCallback(async (signal?: AbortSignal) => {
+    setDriveProbe("checking");
+    try {
+      const response = await fetch("/api/admin/google-drive/status", {
+        cache: "no-store", signal,
+      });
+      if (!response.ok) throw new Error("Could not check Google Drive");
+      setDriveStatus(await response.json() as DriveStatus);
+      setDriveProbe("ready");
+    } catch {
+      if (!signal?.aborted) setDriveProbe("failed");
+    }
+  }, []);
 
-  useEffect(() => { void Promise.resolve().then(load); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    queueMicrotask(() => { if (!controller.signal.aborted) void checkDrive(controller.signal); });
+    return () => controller.abort();
+  }, [checkDrive]);
+
+  useEffect(() => {
+    void Promise.resolve().then(load).catch(() => toast.error("Could not load events. Reload to try again."));
+  }, [load]);
   useEffect(() => {
     const result = new URLSearchParams(window.location.search).get("drive");
     if (!result) return;
     if (result === "connected") toast.success("Google Drive connected — event folders are ready");
+    else if (result === "different-account") {
+      queueMicrotask(() => setDriveAccountMismatch(true));
+    }
     else if (result === "cancelled") toast.error("Google Drive connection was cancelled");
     else if (result === "not-configured") toast.error("Google OAuth credentials still need to be configured");
     else toast.error("Google Drive could not be connected. Please try again.");
@@ -112,7 +172,7 @@ export function AdminDashboard() {
         async execute() {
           const response = await fetch("/api/albums", { cache: "no-store" });
           if (!response.ok) throw new Error("Could not load events");
-          const data = await response.json();
+          const data = (await response.json()) as AlbumsResponse;
           return { events: data.albums.map((album: Album) => ({ id: album.id, title: album.title, eventType: album.event_type, status: album.status, mediaCount: album.media_count })) };
         },
       }, { signal: lifecycle.signal });
@@ -128,7 +188,7 @@ export function AdminDashboard() {
           const value = input as { title?: string; eventType?: string };
           if (!value.title?.trim()) throw new Error("Event title is required");
           const response = await fetch("/api/albums", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value) });
-          const data = await response.json();
+          const data = (await response.json()) as ApiResult<AlbumCreatedResponse>;
           if (!response.ok) throw new Error(data.error ?? "Could not create event");
           await load(); setSelectedId(data.album.id);
           return { id: data.album.id, title: data.album.title, status: data.album.status, guestId: data.album.guest_username, guestPassword: data.album.guest_password };
@@ -143,32 +203,111 @@ export function AdminDashboard() {
   const uploadUrl = shareUrl ? `${shareUrl}?upload=1` : "";
   const slideshowUrl = selected && origin ? `${origin}/g/${selected.access_token}/slideshow` : "";
   const qrTarget = qrMode === "upload" ? uploadUrl : qrMode === "slideshow" ? slideshowUrl : shareUrl;
+  const qrDataUrl = qrImage?.target === qrTarget ? qrImage.dataUrl : "";
   useEffect(() => {
-    if (!qrTarget) {
-      void Promise.resolve().then(() => setQrDataUrl(""));
-      return;
-    }
-    void QRCode.toDataURL(qrTarget, { width: 360, margin: 1, color: { dark: "#5a1749", light: "#fff8fc" } }).then(setQrDataUrl);
+    if (!qrTarget) return;
+    let active = true;
+    void QRCode.toDataURL(qrTarget, { width: 360, margin: 4, color: { dark: "#5a1749", light: "#fff8fc" } })
+      .then((dataUrl) => { if (active) setQrImage({ target: qrTarget, dataUrl }); })
+      .catch(() => { if (active) toast.error("Could not generate the QR code"); });
+    return () => { active = false; };
   }, [qrTarget]);
+  const copyVersionRef = useRef(0);
+  useEffect(() => {
+    copyVersionRef.current += 1;
+    void Promise.resolve().then(() => setCopyFallback(null));
+  }, [qrTarget, selected?.id, selected?.guest_username, selected?.guest_password]);
 
   async function createAlbum(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = new FormData(event.currentTarget); setBusy(true);
-    const response = await fetch("/api/albums", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-      title: form.get("title"), eventType: form.get("eventType"), tagline: form.get("tagline"),
-    }) });
-    const data = await response.json(); setBusy(false);
-    if (!response.ok) return toast.error(data.error ?? "Could not create the event");
-    setAlbums((current) => [data.album, ...current]); setCollections((current) => [...current, data.collection]);
-    setSelectedId(data.album.id); event.currentTarget.reset();
-    toast.success("Draft created — save the guest password, then publish when ready");
+    event.preventDefault();
+    const form = event.currentTarget;
+    const fields = new FormData(form);
+    setBusy(true);
+    try {
+      const response = await fetch("/api/albums", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: fields.get("title"), eventType: fields.get("eventType"), tagline: fields.get("tagline") }),
+      });
+      const data = await response.json() as ApiResult<AlbumCreatedResponse>;
+      if (!response.ok) {
+        if (response.status >= 500) void checkDrive();
+        toast.error(data.error ?? "Could not create the event");
+        return;
+      }
+      setAlbums((current) => [data.album, ...current]);
+      setCollections((current) => [...current, data.collection]);
+      setSelectedId(data.album.id);
+      form.reset();
+      toast.success("Draft created. Save the guest password before publishing.");
+    } catch {
+      toast.error("Could not create the event. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function upload(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selected) return; const formElement = event.currentTarget; setBusy(true);
-    const response = await fetch(`/api/albums/${selected.id}/photos`, { method: "POST", body: new FormData(formElement) });
-    const data = await response.json(); setBusy(false);
-    if (!response.ok) return toast.error(data.error ?? "Upload failed");
-    formElement.reset(); await load(); toast.success(`${data.photos.length} item${data.photos.length === 1 ? "" : "s"} added`);
+    event.preventDefault(); if (!selected) return;
+    const formElement = event.currentTarget;
+    const body = new FormData(formElement);
+    const picker = formElement.querySelector<HTMLInputElement>('input[name="photos"]');
+    const chosen = picker?.files ? [...picker.files] : [];
+    const { selection, count, alreadySaved } = prepareUploads(body, chosen, uploadSelection.current);
+    uploadSelection.current = selection;
+    if (!count) {
+      toast.info(alreadySaved ? "Those files are already uploaded — choose different files" : "Choose at least one photo or video");
+      return;
+    }
+
+    if (alreadySaved) toast.info(`${alreadySaved} already uploaded. Sending the remaining ${count}.`);
+
+    setBusy(true);
+    let response: Response | null = null;
+    let data: UploadResult | null = null;
+    try {
+      response = await fetch(`/api/albums/${selected.id}/photos`, { method: "POST", body, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+      data = await response.json().catch(() => null) as UploadResult | null;
+    } catch (error) {
+      toast.error(error instanceof Error && error.name === "TimeoutError"
+        ? "The upload took too long — check your connection and try again. Your selections are kept."
+        : "The upload did not reach the server — check your connection and try again. Your selections are kept.");
+    } finally {
+      setBusy(false);
+    }
+    if (!response) return;
+
+    const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+    const savedPhotos = Array.isArray(data?.photos) ? data.photos : [];
+    for (const photo of savedPhotos) if (photo.uploadKey) selection.saved.add(photo.uploadKey);
+    setUploadFeedback({ albumId: selected.id, saved: savedPhotos.map((photo) => photo.filename), rejected });
+
+    if (!response.ok) {
+      const detail = describeRejected(rejected);
+      toast.error(`${data?.error ?? "Upload failed"}${detail ? ` — ${detail}` : ""}`);
+      if (savedPhotos.length) {
+        toast.info(`${describeNames(savedPhotos.map((photo) => photo.filename))} — saved before the error and will be skipped if you retry`);
+        await load().catch(() => undefined);
+      }
+      return;
+    }
+
+    if (!data || !savedPhotos.length) {
+      toast.error("The server sent an unexpected response — try again. Your selections are kept.");
+      return;
+    }
+
+    const refreshed = await load().then(() => true).catch(() => false);
+    if (rejected.length) {
+      toast.warning(`${describeNames(savedPhotos.map((photo) => photo.filename))} added — ${describeRejected(rejected)}. Fix those files and upload again.`);
+      if (!refreshed) toast.info("Uploaded — but the event library couldn't refresh. Reload the page to see the new items.");
+      return;
+    }
+
+    formElement.reset();
+    uploadSelection.current = null;
+    setUploadFeedback(null);
+    toast.success(`${savedPhotos.length} item${savedPhotos.length === 1 ? "" : "s"} added`);
+    if (!refreshed) toast.info("Uploaded — but the event library couldn't refresh. Reload the page to see the new items.");
   }
 
   async function saveEvent(patch?: Partial<Album>) {
@@ -180,7 +319,7 @@ export function AdminDashboard() {
       allowGuestUploads: Boolean(next.allow_guest_uploads), moderationMode: next.moderation_mode,
       downloadsEnabled: Boolean(next.downloads_enabled), coverPhotoId: next.cover_photo_id,
     }) });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<Partial<Album>>;
     if (!response.ok) return toast.error(data.error ?? "Could not save event settings");
     updateSelected({ ...patch, ...data }); toast.success(next.status === "live" && selected.status !== "live" ? "Event published — the QR is live" : "Event settings saved");
   }
@@ -188,14 +327,14 @@ export function AdminDashboard() {
   async function createCollection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selected) return; const form = event.currentTarget; const data = new FormData(form);
     const response = await fetch(`/api/albums/${selected.id}/collections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: data.get("name") }) });
-    const result = await response.json(); if (!response.ok) return toast.error(result.error ?? "Could not create album");
+    const result = (await response.json()) as ApiResult<CollectionCreatedResponse>; if (!response.ok) return toast.error(result.error ?? "Could not create album");
     setCollections((current) => [...current, result.collection]); form.reset(); toast.success("Album added");
   }
 
   async function updateMedia(item: Media, patch: { caption?: string; isFeatured?: boolean; moderationStatus?: string }) {
     const response = await fetch(`/api/photos/${item.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
     if (!response.ok) return toast.error("Could not update this memory");
-    const data = await response.json();
+    const data = (await response.json()) as MediaUpdateResponse;
     setMedia((current) => current.map((value) => value.id === item.id ? { ...value, caption: data.caption, is_featured: data.is_featured, moderation_status: data.moderation_status } : value));
     toast.success(patch.moderationStatus === "approved" ? "Memory approved" : patch.moderationStatus === "rejected" ? "Memory hidden" : patch.isFeatured !== undefined ? (patch.isFeatured ? "Added to highlights" : "Removed from highlights") : "Caption saved");
   }
@@ -205,7 +344,7 @@ export function AdminDashboard() {
     const response = await fetch(`/api/albums/${selected.id}/slideshow`, {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
     });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<SlideshowResponse>;
     if (!response.ok) return toast.error(data.error ?? "Could not update the live slideshow");
     updateSelected({
       slideshow_playing: Number(data.playing),
@@ -218,7 +357,7 @@ export function AdminDashboard() {
     if (!selected) return;
     setBusy(true);
     const response = await fetch(`/api/albums/${selected.id}/credentials`, { method: "POST" });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<GuestCredentialsResponse>;
     setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Could not generate a new guest login");
     updateSelected({ guest_username: data.guestUsername, guest_password: data.guestPassword });
@@ -233,7 +372,7 @@ export function AdminDashboard() {
     if (!selected) return;
     setBusy(true);
     const response = await fetch(`/api/albums/${selected.id}`, { method: "DELETE" });
-    const data = await response.json();
+    const data = (await response.json()) as ApiResult<{ deletedMedia: number }>;
     setBusy(false);
     if (!response.ok) return toast.error(data.error ?? "Could not delete this event");
     setAlbums((current) => current.filter((album) => album.id !== selected.id));
@@ -246,7 +385,30 @@ export function AdminDashboard() {
     if (!selected) return;
     setAlbums((current) => current.map((album) => album.id === selected.id ? { ...album, ...patch } : album));
   }
-  function copy(value: string, label: string) { void navigator.clipboard.writeText(value); toast.success(`${label} copied`); }
+  function saveQrSign() {
+    if (!selected || !qrTarget) return;
+    try {
+      downloadQrSign({ title: selected.title, target: qrTarget, mode: qrMode, slug: selected.event_slug });
+    } catch {
+      toast.error("Could not download the QR sign");
+    }
+  }
+  const copyAttemptRef = useRef(0);
+  async function copy(value: string, label: string) {
+    const attempt = ++copyAttemptRef.current;
+    const version = copyVersionRef.current;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(value);
+      if (attempt !== copyAttemptRef.current || version !== copyVersionRef.current) return;
+      setCopyFallback(null);
+      toast.success(`${label} copied`);
+    } catch {
+      if (attempt !== copyAttemptRef.current || version !== copyVersionRef.current) return;
+      setCopyFallback({ label, value });
+      toast.error(`Couldn’t copy the ${label.toLowerCase()} — select and copy it manually below.`);
+    }
+  }
 
   return (
     <>
@@ -270,15 +432,33 @@ export function AdminDashboard() {
         </section>
 
         <div className="hub-content-grid">
-          <section className={`hub-card drive-connection-card ${driveStatus.connected ? "connected" : "needs-connection"}`}>
+          <section className={`hub-card drive-connection-card ${driveBlocked ? "attention" : driveStatus.connected && driveStatus.configured ? "connected" : "needs-connection"}`}>
             <div className="hub-card-title"><span><HardDrive /></span><div><h2>Google Drive</h2><p>All original photos and videos are stored only in your Drive.</p></div></div>
-            {driveStatus.connected ? <>
+            {driveAccountMismatch && <div className="draft-warning"><TriangleAlert /> Reconnect with the original Google account{driveStatus.email ? ` (${driveStatus.email})` : ""} to keep existing event media accessible.</div>}
+            {driveProbe === "checking" ? <p className="drive-connection-copy" role="status">Checking Google Drive…</p>
+            : driveProbe === "failed" ? <>
+              <p className="drive-connection-copy" role="status">Could not check Google Drive. You can still manage your events.</p>
+              <div className="card-actions"><button type="button" onClick={() => void checkDrive()}><HardDrive /> Check connection</button></div>
+            </> : !driveStatus.configured ? <>
+              <p className="drive-connection-copy">Snap HUB stores every original photo and video in the host&apos;s Google Drive, so the Google OAuth client must be configured on the Worker before anything can connect.</p>
+              <div className="draft-warning"><Clock3 /> Google OAuth setup is required before Drive can be connected — add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the Worker, then return here.{driveStatus.connected ? " The saved connection works again once setup is done." : ""}</div>
+              <div className="card-actions"><a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Google OAuth setup guide</a></div>
+            </> : driveNeedsReconnect ? <>
+              <div className="drive-connection-state expired"><span><TriangleAlert /> Reconnect needed</span><strong>{driveStatus.email}</strong></div>
+              <p className="drive-connection-copy">Google Drive access for this account has expired or been revoked. Uploads, media playback, and new event folders will fail until Drive is connected again — reconnecting keeps every event, memory, and Drive folder exactly as it is.</p>
+              <div className="card-actions"><a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a>{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Setup guide</a></div>
+            </> : driveMisconfigured ? <>
+              <div className="drive-connection-state expired"><span><TriangleAlert /> OAuth credentials problem</span><strong>{driveStatus.email}</strong></div>
+              <p className="drive-connection-copy">Google rejects the Worker&apos;s OAuth client settings, so Drive requests keep failing. Correct GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the Worker configuration — reconnecting only helps after the credentials are fixed.</p>
+              <div className="card-actions"><a className="drive-connect-button" href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> OAuth setup guide</a><a href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a></div>
+            </> : driveStatus.connected ? <>
               <div className="drive-connection-state"><span><Check /> Connected</span><strong>{driveStatus.email}</strong></div>
               <div className="drive-folder-map"><span>Snap HUB</span><i>›</i><span>Event name</span><i>›</i><span>Photos · Videos · Guest Uploads · Highlights</span></div>
+              {driveStatus.reason === "unverified" && <p className="drive-connection-note">Snap HUB could not confirm the connection just now — reconnect only if uploads start failing.</p>}
               <div className="card-actions">{driveStatus.rootFolderUrl && <a href={driveStatus.rootFolderUrl} target="_blank" rel="noreferrer"><FolderOpen /> Open Snap HUB folder</a>}<a href="/api/admin/google-drive/connect"><HardDrive /> Reconnect Drive</a></div>
             </> : <>
-              <p className="drive-connection-copy">Connect the host Google account before creating an event. Snap HUB will create one folder per event and sort every upload automatically.</p>
-              {driveStatus.configured ? <a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Connect Google Drive</a> : <div className="draft-warning"><Clock3 /> Google OAuth setup is required before Drive can be connected.</div>}
+              <p className="drive-connection-copy">Connect the host Google account before creating an event. Connecting opens Google&apos;s consent screen for the host account — Snap HUB then creates one folder per event and sorts every upload automatically.</p>
+              <div className="card-actions"><a className="drive-connect-button" href="/api/admin/google-drive/connect"><HardDrive /> Connect Google Drive</a><a href={GOOGLE_DRIVE_SETUP_GUIDE} target="_blank" rel="noreferrer"><ExternalLink /> Setup guide</a></div>
             </>}
           </section>
 
@@ -288,15 +468,16 @@ export function AdminDashboard() {
               <label>Event name<input name="title" required placeholder="e.g. Aditya’s 30th Birthday" /></label>
               <label>Type<select name="eventType">{eventTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
               <label>Short tagline<input name="tagline" placeholder="The beginning of forever" /></label>
-              <button disabled={busy || !driveStatus.connected}>{driveStatus.connected ? "Create draft event" : "Connect Google Drive first"}</button>
+              <button disabled={busy || !driveUsable}>{driveUsable ? "Create draft event" : driveActionHint}</button>
             </form>
           </section>
 
           {selected && <section className="hub-card qr-card">
             <div className="hub-card-title"><span><QrCode /></span><div><h2>Share &amp; QR centre</h2><p>Make a QR for the gallery, guest uploads, or the live screen.</p></div></div>
             <div className="qr-tabs"><button className={qrMode === "gallery" ? "active" : ""} onClick={() => setQrMode("gallery")}>Gallery</button><button className={qrMode === "upload" ? "active" : ""} onClick={() => setQrMode("upload")}>Upload</button><button className={qrMode === "slideshow" ? "active" : ""} onClick={() => setQrMode("slideshow")}>Slideshow</button></div>
-            <div className="qr-share-layout">{qrDataUrl && <div className="qr-box"><img src={qrDataUrl} alt={`QR code for ${selected.title}`} /></div>}<div className="share-details"><button onClick={() => copy(qrTarget, "Share link")}><small>{qrMode} link</small><strong>{qrTarget}</strong><Copy /></button>{selected.access_mode === "password" && <button onClick={() => copy(selected.guest_username, "Guest ID")}><small>Guest ID</small><strong>{selected.guest_username}</strong><Copy /></button>}{selected.guest_password && <button className="password-row" onClick={() => copy(selected.guest_password!, "Password")}><small>New password · save now</small><strong>{selected.guest_password}</strong><Copy /></button>}</div></div>
-            <div className="card-actions"><a href={qrTarget} target="_blank" rel="noreferrer"><ExternalLink /> Open {qrMode}</a>{qrDataUrl && <a href={qrDataUrl} download={`${selected.event_slug ?? "snap-hub"}-${qrMode}-qr.png`}><Download /> Download QR</a>}{selected.access_mode === "password" && <button onClick={() => void rotateGuestCredentials()} disabled={busy}><KeyRound /> New guest login</button>}</div>
+            <div className="qr-share-layout">{qrDataUrl && <div className="qr-box"><img src={qrDataUrl} alt={`QR code for ${selected.title}`} /></div>}<div className="share-details"><button onClick={() => void copy(qrTarget, "Share link")}><small>{qrMode} link</small><strong>{qrTarget}</strong><Copy /></button>{selected.access_mode === "password" && <button onClick={() => void copy(selected.guest_username, "Guest ID")}><small>Guest ID</small><strong>{selected.guest_username}</strong><Copy /></button>}{selected.guest_password && <button className="password-row" onClick={() => void copy(selected.guest_password!, "Password")}><small>New password · save now</small><strong>{selected.guest_password}</strong><Copy /></button>}</div></div>
+            {copyFallback && <div className="copy-fallback"><small>Clipboard blocked — select and copy the {copyFallback.label.toLowerCase()} manually</small><input readOnly value={copyFallback.value} onFocus={(event) => event.currentTarget.select()} onClick={(event) => event.currentTarget.select()} aria-label={`${copyFallback.label} — select and copy manually`} /></div>}
+            <div className="card-actions"><a href={qrTarget} target="_blank" rel="noreferrer"><ExternalLink /> Open {qrMode}</a>{qrDataUrl && <a href={qrDataUrl} download={`${selected.event_slug ?? "snap-hub"}-${qrMode}-qr.png`}><Download /> Download QR</a>}{qrTarget && <button type="button" onClick={saveQrSign}><Download /> Download print sign</button>}{selected.access_mode === "password" && <button onClick={() => void rotateGuestCredentials()} disabled={busy}><KeyRound /> New guest login</button>}</div>
             {selected.status !== "live" && <div className="draft-warning"><Clock3 /> Guests see a waiting screen until this event is published.</div>}
           </section>}
 
@@ -336,11 +517,12 @@ export function AdminDashboard() {
 
           {selected && <section className="hub-card upload-card-new" id="uploads">
             <div className="hub-card-title"><span><Upload /></span><div><h2>Add memories</h2><p>Upload photos and videos into a named album.</p></div></div>
-            <form onSubmit={upload} className="media-upload-form expanded-upload">
+            <form key={selected.id} onSubmit={upload} className="media-upload-form expanded-upload">
               <div className="upload-meta"><select name="collectionId">{selectedCollections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select><input name="caption" placeholder="Optional caption for this upload" /></div>
-              <label><ImagePlus /><span><strong>Choose photos &amp; videos</strong><small>JPG, PNG, WebP, MP4 and MOV · up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required /></label>
-              <button disabled={busy || !driveStatus.connected}>{busy ? "Uploading…" : driveStatus.connected ? "Upload to Google Drive" : "Connect Google Drive first"}</button>
+              <label><ImagePlus /><span><strong>Choose photos &amp; videos</strong><small>JPG, PNG, WebP, MP4 and MOV · up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required disabled={busy} onChange={() => setUploadFeedback(null)} /></label>
+              <button disabled={busy || !driveUsable}>{busy ? "Uploading…" : driveUsable ? "Upload to Google Drive" : driveActionHint}</button>
             </form>
+            <UploadSummary key={selected.id} feedback={uploadFeedback?.albumId === selected.id ? uploadFeedback : null} />
             <form className="collection-form" onSubmit={createCollection}><input name="name" placeholder="New album name — e.g. Reception" required /><button><FolderPlus /> Add album</button></form>
             <div className="collection-chips">{selectedCollections.map((collection) => <span key={collection.id}>{collection.name}</span>)}</div>
           </section>}

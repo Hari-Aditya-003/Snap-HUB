@@ -52,7 +52,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   });
 }
 
-export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { id } = await context.params;
@@ -62,7 +62,7 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
   const mediaCount = await env.DB.prepare("SELECT COUNT(*) AS count FROM photos WHERE album_id = ?")
     .bind(id).first<{ count: number }>();
   try {
-    await deleteDriveFile(album.drive_folder_id);
+    await deleteDriveFile(album.drive_folder_id, request);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof GoogleDriveError ? error.message : "Could not delete the event folder from Google Drive." },

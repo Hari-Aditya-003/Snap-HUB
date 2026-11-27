@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
 
 # next.js
 /.next/
@@ -21,6 +23,12 @@
 # misc
 .DS_Store
 *.pem
+
+# Xcode per-user state (shared schemes under xcshareddata stay tracked)
+**/xcuserdata/
+*.xcuserstate
+xcschememanagement.plist
+*.xcscmblueprint
 
 # debug
 npm-debug.log*

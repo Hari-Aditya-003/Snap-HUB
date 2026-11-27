@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft, ChevronRight, Download, Film, Heart, Image as ImageIcon,
   ImageUp, Maximize2, Play, Search, Sparkles, Star, Upload, X,
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import Link from "next/link";
+import { UploadSummary, type UploadFeedback } from "./upload-summary";
+import {
+  describeNames, describeRejected, prepareUploads, UPLOAD_TIMEOUT_MS, type UploadSelection,
+} from "@/lib/uploads";
 
 type GalleryMedia = {
   id: string; filename: string; contentType: string; caption: string; isFeatured: boolean;
@@ -25,6 +29,18 @@ type GalleryViewProps = {
 
 type Filter = "all" | "photos" | "videos" | "highlights" | "favorites";
 
+type UploadPhotoResult = { id: string; filename: string; size?: number; moderationStatus?: string; uploadKey?: string };
+type UploadResult = {
+  photos?: UploadPhotoResult[];
+  rejected?: Array<{ filename: string; reason: string }>;
+  moderationStatus?: string;
+  error?: string;
+};
+
+function filenamesOf(photos: UploadPhotoResult[]) {
+  return describeNames(photos.map((photo) => photo.filename));
+}
+
 export function GalleryView({ album, token, media: initialMedia, collections }: GalleryViewProps) {
   const [media, setMedia] = useState(initialMedia);
   const [filter, setFilter] = useState<Filter>("all");
@@ -34,6 +50,8 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const uploadSelection = useRef<UploadSelection | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(`snap-hub-favorites:${token}`);
@@ -51,6 +69,65 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const text = `${item.filename} ${item.caption} ${item.collectionName ?? ""}`.toLowerCase();
     return kindMatch && collectionMatch && text.includes(query.toLowerCase().trim());
   }), [collectionId, favorites, filter, media, query]);
+  const filteredRef = useRef(filtered);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const viewerOpen = viewerIndex !== null && filtered[viewerIndex] !== undefined;
+
+  useEffect(() => { filteredRef.current = filtered; }, [filtered]);
+
+  useEffect(() => {
+    if (!viewerOpen) return;
+    const dialog = viewerRef.current;
+    dialog?.querySelector<HTMLElement>(".close-show")?.focus({ preventScroll: true });
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setViewerIndex(null);
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusables = dialog ? Array.from(dialog.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), a[href], video[controls], [tabindex]:not([tabindex=\"-1\"])",
+        )) : [];
+        if (!focusables.length || !dialog) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (document.activeElement === dialog) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey ? document.activeElement === first : document.activeElement === last) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (!dialog.contains(document.activeElement)) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("video, input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        setViewerIndex((value) => value === null ? 0 : (value + direction + filteredRef.current.length) % filteredRef.current.length);
+      }
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        setViewerIndex(event.key === "Home" ? 0 : filteredRef.current.length - 1);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      if (openerRef.current?.isConnected) openerRef.current.focus();
+      else document.querySelector<HTMLElement>(".memory-open, .filter-tabs button")?.focus();
+      openerRef.current = null;
+    };
+  }, [viewerOpen]);
 
   function move(direction: number) {
     setViewerIndex((value) => value === null ? 0 : (value + direction + filtered.length) % filtered.length);
@@ -64,31 +141,99 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     });
   }
   async function refreshMedia() {
-    const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
-    if (!response.ok) return;
-    const data = await response.json() as { media: GalleryMedia[] };
-    setMedia(data.media);
+    try {
+      const response = await fetch(`/api/gallery/${token}/media`, { cache: "no-store" });
+      if (!response.ok) return false;
+      const data = await response.json() as { media: GalleryMedia[] };
+      setMedia(data.media);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function closeUploadPanel() {
+    setUploadOpen(false);
+    uploadSelection.current = null;
+    setUploadFeedback(null);
   }
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
-    setUploading(true);
-    const response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body: new FormData(form) });
-    const data = await response.json();
-    setUploading(false);
-    if (!response.ok) return toast.error(data.error ?? "Upload failed");
-    form.reset();
-    if (data.moderationStatus === "approved") {
-      await refreshMedia();
-      toast.success("Your memories are now in the gallery");
-    } else {
-      toast.success("Uploaded — the host will approve these memories");
+    const body = new FormData(form);
+    const picker = form.querySelector<HTMLInputElement>('input[name="photos"]');
+    const selected = picker?.files ? [...picker.files] : [];
+    const { selection, count, alreadySaved } = prepareUploads(body, selected, uploadSelection.current);
+    uploadSelection.current = selection;
+    if (!count) {
+      toast.info(alreadySaved
+        ? "Those memories are already saved — choose different files or close this panel"
+        : "Choose at least one photo or video");
+      return;
     }
+    if (alreadySaved) {
+      toast.info(`${alreadySaved} already saved — sending only the remaining ${count}`);
+    }
+
+    setUploading(true);
+    let response: Response | null = null;
+    let data: UploadResult | null = null;
+    try {
+      response = await fetch(`/api/gallery/${token}/upload`, { method: "POST", body, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+      data = await response.json().catch(() => null) as UploadResult | null;
+    } catch (error) {
+      toast.error(error instanceof Error && error.name === "TimeoutError"
+        ? "The upload took too long — check your connection and try again. Your selections are kept."
+        : "The upload did not reach the server — check your connection and try again. Your selections are kept.");
+    } finally {
+      setUploading(false);
+    }
+    if (!response) return;
+
+    const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
+    const savedPhotos = Array.isArray(data?.photos) ? data.photos : [];
+    for (const photo of savedPhotos) if (photo.uploadKey) selection.saved.add(photo.uploadKey);
+    setUploadFeedback({ saved: savedPhotos.map((photo) => photo.filename), rejected });
+
+    if (!response.ok) {
+      const detail = describeRejected(rejected);
+      toast.error(`${data?.error ?? "Upload failed — please try again"}${detail ? ` — ${detail}` : ""}`);
+      if (savedPhotos.length) {
+        toast.info(`${filenamesOf(savedPhotos)} — saved before the error and will be skipped if you send again`);
+        if (savedPhotos.some((photo) => photo.moderationStatus === "approved") && !(await refreshMedia())) {
+          toast.info("The new memories are saved — reload the page to see them");
+        }
+      }
+      return;
+    }
+
+    if (!data || !savedPhotos.length) {
+      toast.error("The server sent an unexpected response — try again. Your selections are kept.");
+      return;
+    }
+
+    let refreshFailed = false;
+    if (data.moderationStatus === "approved") refreshFailed = !(await refreshMedia());
+
+    if (rejected.length) {
+      toast.warning(`${filenamesOf(savedPhotos)} saved — ${describeRejected(rejected)}. Fix those files and send again.`);
+      if (refreshFailed) toast.info("Saved — but the gallery couldn't refresh. Reload the page to see your new memories.");
+      return;
+    }
+
+    form.reset();
+    uploadSelection.current = null;
+    setUploadFeedback(null);
+    toast.success(data.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
+    if (refreshFailed) toast.info("Saved — but the gallery couldn't refresh. Reload the page to see your new memories.");
     setUploadOpen(false);
   }
 
   const active = viewerIndex === null ? null : filtered[viewerIndex];
   const src = (item: GalleryMedia) => `/api/gallery/${token}/photos/${item.id}`;
+
+  useEffect(() => {
+    if (viewerIndex !== null && !active) queueMicrotask(() => setViewerIndex(null));
+  }, [active, viewerIndex]);
 
   return (
     <main className={`memory-gallery theme-${album.theme}`}>
@@ -110,14 +255,15 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       </section>
 
       {uploadOpen && album.allowGuestUploads && <section className="guest-upload-panel">
-        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={() => setUploadOpen(false)} aria-label="Close upload"><X /></button></div>
+        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={closeUploadPanel} disabled={uploading} aria-label="Close upload"><X /></button></div>
         <form onSubmit={upload}>
           <label>Your name<input name="uploaderName" maxLength={80} placeholder="How should the host know you?" /></label>
           <label>Caption<input name="caption" maxLength={240} placeholder="A short memory or message" /></label>
           {collections.length > 0 && <label>Album<select name="collectionId">{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select></label>}
-          <label className="guest-file-picker"><ImageUp /><span><strong>Choose photos or videos</strong><small>Up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required /></label>
+          <label className="guest-file-picker"><ImageUp /><span><strong>Choose photos or videos</strong><small>Up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required disabled={uploading} onChange={() => setUploadFeedback(null)} /></label>
           <button disabled={uploading}>{uploading ? "Uploading…" : album.moderationMode === "manual" ? "Send for approval" : "Add to gallery"}</button>
         </form>
+        <UploadSummary feedback={uploadFeedback} />
       </section>}
 
       <section className="gallery-toolbar">
@@ -136,7 +282,7 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
         {filtered.map((item, index) => {
           const isVideo = item.contentType.startsWith("video/");
           return <article key={item.id} className="memory-card">
-            <button className="memory-open" onClick={() => setViewerIndex(index)} aria-label={`Open ${item.filename}`}>
+            <button className="memory-open" onClick={(event) => { openerRef.current = event.currentTarget; setViewerIndex(index); }} aria-label={`Open ${item.filename}`}>
               {isVideo ? <video src={src(item)} preload="metadata" muted playsInline /> : <img src={src(item)} alt={item.caption || item.filename} loading="lazy" decoding="async" />}
               <span className="expand-chip"><Maximize2 /> View</span>
               {isVideo && <span className="video-chip"><Play /> Video</span>}
@@ -150,14 +296,15 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
 
       <footer className="memory-footer"><strong>Snap HUB</strong><span>One QR · Every memory · No app needed</span></footer>
 
-      {active && <div className="slideshow" role="dialog" aria-modal="true" aria-label="Memory viewer">
+      {active && <div className="slideshow" role="dialog" aria-modal="true" aria-label="Memory viewer" ref={viewerRef} tabIndex={-1}>
+        <p className="sr-only" role="status">{`Memory ${(viewerIndex ?? 0) + 1} of ${filtered.length}: ${active.caption || active.filename}`}</p>
         <button className="close-show" onClick={() => setViewerIndex(null)} aria-label="Close viewer"><X /></button>
-        <button className="slide-nav prev" onClick={() => move(-1)} aria-label="Previous memory"><ChevronLeft /></button>
+        <button className="slide-nav prev" disabled={filtered.length < 2} onClick={() => move(-1)} aria-label="Previous memory"><ChevronLeft /></button>
         <div className="slide-stage">
           {active.contentType.startsWith("video/") ? <video key={active.id} src={src(active)} controls autoPlay playsInline /> : <img key={active.id} src={src(active)} alt={active.caption || active.filename} decoding="async" />}
           <div className="slide-info"><div><strong>{active.caption || active.filename}</strong><span>{(viewerIndex ?? 0) + 1} of {filtered.length}</span></div><button onClick={() => toggleFavorite(active.id)}><Heart /> {favorites.has(active.id) ? "Saved" : "Save"}</button>{album.downloadsEnabled && <a href={`${src(active)}?download=1`}><Download /> Download</a>}</div>
         </div>
-        <button className="slide-nav next" onClick={() => move(1)} aria-label="Next memory"><ChevronRight /></button>
+        <button className="slide-nav next" disabled={filtered.length < 2} onClick={() => move(1)} aria-label="Next memory"><ChevronRight /></button>
       </div>}
     </main>
   );
