@@ -13,7 +13,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "typecheck": "tsc --noEmit --incremental false",
     "db:generate": "drizzle-kit generate",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && node --import tsx --test tests/*.test.mjs",
     "test:browser": "npm run build && playwright test",
     "test:security": "node --import tsx scripts/security-smoke.mts",
     "db:create": "wrangler d1 create snap-hub-db --binding DB --update-config --config wrangler.json",

@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import { expect, test, type Page } from "@playwright/test";
 import { type LocalWorker, startLocalWorker } from "./local-worker";
 
 // A tiny valid 1x1 PNG: it passes the guest-upload signature check and the
@@ -69,9 +70,14 @@ test("guest opens the event link, browses media, and opens and closes the viewer
       .toBe(true);
   }
 
-  await cards.first().getByRole("button", { name: "Open first-dance.png" }).click();
+  const opener = cards.first().getByRole("button", { name: "Open first-dance.png" });
+  await opener.focus();
+  await page.keyboard.press("Enter");
   const viewer = page.getByRole("dialog", { name: "Memory viewer" });
   await expect(viewer).toBeVisible();
+  await expect(viewer.getByRole("button", { name: "Close viewer" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(viewer.getByRole("button", { name: "Next memory" })).toBeFocused();
   await expect(viewer.locator(".slide-info")).toContainText("First dance");
   await expect(viewer.locator(".slide-info")).toContainText("1 of 3");
   await expect
@@ -79,9 +85,10 @@ test("guest opens the event link, browses media, and opens and closes the viewer
       .evaluate((element) => element instanceof HTMLImageElement && element.complete && element.naturalWidth > 0))
     .toBe(true);
 
-  await viewer.getByRole("button", { name: "Next memory" }).click();
+  await page.keyboard.press("ArrowRight");
   await expect(viewer.locator(".slide-info")).toContainText("Cake cutting");
   await expect(viewer.locator(".slide-info")).toContainText("2 of 3");
+  await expect(viewer.getByRole("status")).toContainText(/Memory 2 of 3.*Cake cutting/);
 
   // The fake adapter serves a genuinely playable MP4 for video entries and
   // honours byte-range requests the way Drive does.
@@ -100,7 +107,16 @@ test("guest opens the event link, browses media, and opens and closes the viewer
   expect(ranged.status()).toBe(206);
   expect(ranged.headers()["content-range"]).toBe("bytes 0-99/1979");
 
-  await viewer.getByRole("button", { name: "Close viewer" }).click();
+  await page.keyboard.press("Escape");
+  await expect(viewer).toBeHidden();
+  await expect(opener).toBeFocused();
+
+  await page.getByRole("button", { name: "Videos", exact: true }).click();
+  await expect(cards).toHaveCount(1);
+  await cards.first().getByRole("button", { name: "Open highlight-clip.mp4" }).click();
+  await expect(viewer.getByRole("status")).toContainText("Memory 1 of 1");
+  await expect(viewer.getByRole("button", { name: "Next memory" })).toBeDisabled();
+  await page.keyboard.press("Escape");
   await expect(viewer).toBeHidden();
 });
 
@@ -137,22 +153,153 @@ test("pending guest upload appears in the gallery only after host approval", asy
   await expect(cards).toHaveCount(3);
   await expect(pendingCard).toHaveCount(0);
 
-  // The host approves through the same PATCH endpoint the dashboard calls.
-  const login = await page.request.post(`${worker.origin}/api/admin/login`, {
-    form: { username: worker.adminUsername, password: worker.adminPassword },
-    maxRedirects: 0,
-  });
-  expect(login.status()).toBe(303);
-  const approve = await page.request.patch(`${worker.origin}/api/photos/${uploaded.photos[0].id}`, {
-    data: { moderationStatus: "approved" },
-  });
-  expect(approve.ok()).toBeTruthy();
+  await signIn(page);
+  await page.goto(`${worker.origin}/admin`);
+  const pending = page.locator(".host-media-card").filter({ has: page.getByRole("img", { name: "Disposable upload" }) });
+  const approved = page.waitForResponse((response) => response.url().endsWith(`/api/photos/${uploaded.photos[0].id}`)
+    && response.request().method() === "PATCH");
+  await pending.getByRole("button", { name: "Approve" }).click();
+  expect((await approved).ok()).toBe(true);
+  await expect(pending.locator(".moderation-badge")).toHaveText("approved");
 
-  await page.reload();
+  await page.goto(galleryUrl());
   await expect(cards).toHaveCount(4);
   await expect(pendingCard).toBeVisible();
   await pendingCard.getByRole("button", { name: "Open guest-upload.png" }).click();
   const viewer = page.getByRole("dialog", { name: "Memory viewer" });
   await expect(viewer).toBeVisible();
   await expect(viewer.locator(".slide-info")).toContainText("Disposable upload");
+});
+
+async function signIn(page: Page) {
+  const response = await page.request.post(`${worker.origin}/api/admin/login`, {
+    form: { username: worker.adminUsername, password: worker.adminPassword },
+    maxRedirects: 0,
+  });
+  expect(response.status()).toBe(303);
+}
+
+test("a mixed upload survives a dropped response and acknowledges the same saved photo", async ({ page }) => {
+  await page.goto(galleryUrl());
+  await page.getByRole("button", { name: "Add memories" }).click();
+  const panel = page.locator(".guest-upload-panel");
+  const send = panel.getByRole("button", { name: "Send for approval" });
+  await panel.getByRole("textbox", { name: "Caption" }).fill("Recover this caption");
+  await panel.locator('input[name="photos"]').setInputFiles([
+    { name: "retry.png", mimeType: "image/png", buffer: PNG_BYTES },
+    { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("notes") },
+  ]);
+  const savedIds: string[] = [];
+  await page.route(`**/api/gallery/${GUEST_TOKEN}/upload`, async (route) => {
+    const response = await route.fetch();
+    const result = await response.json() as { photos: Array<{ id: string }> };
+    savedIds.push(result.photos[0]?.id ?? "");
+    if (savedIds.length === 1) await route.abort();
+    else await route.fulfill({ response });
+  });
+  await send.click();
+  await expect(page.getByText(/check your connection and try again/i)).toBeVisible();
+  await expect(send).toBeEnabled();
+  await expect(panel.getByRole("textbox", { name: "Caption" })).toHaveValue("Recover this caption");
+  await send.click();
+  await expect(panel.locator(".upload-summary")).toContainText("notes.txt");
+  await expect(panel.locator(".upload-summary")).toContainText("retry.png");
+  expect(savedIds).toHaveLength(2);
+  expect(savedIds[0]).toMatch(/^upload-/);
+  expect(savedIds[1]).toBe(savedIds[0]);
+
+  await signIn(page);
+  const dashboard = await page.request.get(`${worker.origin}/api/albums`);
+  const { photos } = await dashboard.json() as { photos: Array<{ filename: string; caption: string }> };
+  const saved = photos.filter(({ filename }) => filename === "retry.png");
+  expect(saved).toHaveLength(1);
+  expect(saved[0].caption).toBe("Recover this caption");
+});
+
+test("host downloads a printable PNG sign for the selected QR target", async ({ page }) => {
+  await signIn(page);
+  await page.goto(`${worker.origin}/admin`);
+  const share = page.locator(".qr-card");
+  await share.getByRole("button", { name: "Upload", exact: true }).click();
+  await expect(share.getByRole("link", { name: "Open upload" })).toHaveAttribute("href", /\?upload=1$/);
+  const downloaded = page.waitForEvent("download");
+  await share.getByRole("button", { name: "Download print sign" }).click();
+  const file = await downloaded;
+  expect(file.suggestedFilename()).toBe("browser-smoke-event-upload-sign.png");
+  const bytes = await readFile(await file.path());
+  expect(bytes.subarray(1, 4).toString()).toBe("PNG");
+  expect(bytes.readUInt32BE(16)).toBe(1600);
+  expect(bytes.readUInt32BE(20)).toBe(2000);
+});
+
+test("slideshow recovers from a delayed poll and follows host next and previous", async ({ page }) => {
+  await signIn(page);
+  const control = `${worker.origin}/api/albums/${ALBUM_ID}/slideshow`;
+  expect((await page.request.patch(control, { data: { action: "restart" } })).ok()).toBe(true);
+  let pending = 0;
+  let peak = 0;
+  let first = true;
+  await page.route(`**/api/gallery/${GUEST_TOKEN}/media`, async (route) => {
+    pending += 1;
+    peak = Math.max(peak, pending);
+    try {
+      if (first) {
+        first = false;
+        // A visibility change and the regular poll occur while this call is in flight.
+        await new Promise((resolve) => setTimeout(resolve, 1900));
+        await route.fulfill({ status: 503, body: "Temporarily unavailable" });
+      } else {
+        await route.continue();
+      }
+    } finally {
+      pending -= 1;
+    }
+  });
+  await page.goto(`${galleryUrl()}/slideshow`);
+  const pause = page.getByRole("button", { name: "Pause on this screen" });
+  await pause.click();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("Reconnecting…")).toBeVisible();
+  await expect(page.getByText("Live control connected")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume on this screen" })).toBeEnabled();
+  expect(peak).toBe(1);
+
+  const slide = page.locator(".live-show-media");
+  await expect(slide).toContainText("1 /");
+  expect((await page.request.patch(control, { data: { action: "next" } })).ok()).toBe(true);
+  await expect(slide).toContainText("2 /");
+  expect((await page.request.patch(control, { data: { action: "previous" } })).ok()).toBe(true);
+  await expect(slide).toContainText("1 /");
+});
+
+test("Drive status failure leaves events usable and can be retried", async ({ page }) => {
+  await signIn(page);
+  let first = true;
+  await page.route("**/api/admin/google-drive/status", async (route) => {
+    if (first) {
+      first = false;
+      await route.fulfill({ status: 503 });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto(`${worker.origin}/admin`);
+  await expect(page.getByRole("heading", { name: "Browser smoke event" })).toBeVisible();
+  await expect(page.getByText("Could not check Google Drive. You can still manage your events.")).toBeVisible();
+  await page.getByRole("button", { name: "Check connection" }).click();
+  await expect(page.getByRole("link", { name: "Google OAuth setup guide" })).toBeVisible();
+});
+
+test("clipboard failure offers the exact current sharing target for manual copy", async ({ page }) => {
+  await signIn(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("Denied")) } });
+  });
+  await page.goto(`${worker.origin}/admin`);
+  const share = page.locator(".qr-card");
+  for (const [tab, target] of [["Gallery", ""], ["Upload", "?upload=1"], ["Slideshow", "/slideshow"]]) {
+    await share.getByRole("button", { name: tab, exact: true }).click();
+    await share.getByRole("button", { name: new RegExp(tab + " link", "i") }).click();
+    await expect(share.getByRole("textbox", { name: /select and copy manually/i })).toHaveValue(galleryUrl() + target);
+  }
 });

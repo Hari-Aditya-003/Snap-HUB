@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { getAlbumById } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { isAdmin } from "@/lib/security";
-import { parseKnownSaved, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
+import { readUploadKeys, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!(await isAdmin())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -25,6 +25,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!collection) return NextResponse.json({ error: "Album not found for this event" }, { status: 400 });
   }
 
+  const keys = readUploadKeys(form, files);
+  if (!keys) return NextResponse.json({ error: "Invalid upload identity" }, { status: 400 });
   const { accepted, rejected } = await splitMediaFiles(files);
   if (!accepted.length) {
     return NextResponse.json({ error: "Files must be photos or videos under 75 MB", rejected }, { status: 400 });
@@ -34,9 +36,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     const folders = await ensureEventDriveFolders(album, request);
     await saveMediaFiles(env.DB, accepted, {
-      albumId, uploaderName: "Host", source: "host",
-    }, parseKnownSaved(form.get("knownSaved")), async (file) => {
-      const photoId = crypto.randomUUID();
+      albumId, source: "host",
+    }, keys, async (file, photoId) => {
       const folderId = file.type.startsWith("video/") ? folders.videosFolderId : folders.photosFolderId;
       const uploaded = await uploadDriveMedia(file, folderId, { albumId, photoId, source: "host" }, request);
       try {
@@ -49,7 +50,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         await deleteDriveFile(uploaded.id, request).catch(() => undefined);
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
-      return { id: photoId, moderationStatus: "approved" };
+      return "approved";
     }, outcome);
   } catch (error) {
     const message = error instanceof GoogleDriveError ? error.message : "Google Drive upload failed.";

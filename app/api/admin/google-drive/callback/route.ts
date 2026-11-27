@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import {
   exchangeGoogleOAuthCode,
+  GoogleDriveError,
   saveGoogleDriveConnection,
   verifyGoogleOAuthState,
 } from "@/lib/google-drive";
@@ -33,9 +34,9 @@ export async function GET(request: Request) {
   if (!code) return finish(request, "missing-code");
   try {
     const authorization = await exchangeGoogleOAuthCode(code, url.origin);
-    const saved = await saveGoogleDriveConnection(authorization.refreshToken, authorization.accessToken, authorization.email);
-    return finish(request, saved.accountChanged ? "connected-account-changed" : "connected");
-  } catch {
-    return finish(request, "failed");
+    await saveGoogleDriveConnection(authorization.refreshToken, authorization.accessToken, authorization.email);
+    return finish(request, "connected");
+  } catch (error) {
+    return finish(request, error instanceof GoogleDriveError && error.status === 409 ? "different-account" : "failed");
   }
 }

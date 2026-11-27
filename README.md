@@ -33,7 +33,7 @@ Host credentials are runtime secrets and are never committed to the repository.
 - Host authentication with signed, HTTP-only sessions and login rate limiting
 - Event creation for weddings, birthdays, festivals, graduations, corporate events, concerts, and other celebrations
 - Private guest links, generated or rotated guest IDs/passwords, and downloadable QR codes
-- Separate QR targets for the gallery, guest uploads, and live slideshow
+- Separate QR targets for the gallery, guest uploads, and live slideshow, with downloadable print signs
 - Photo and video uploads directly to the host's Google Drive
 - Collections, captions, event cover photos, themes, and welcome text
 - Guest uploads with manual or instant moderation
@@ -138,7 +138,7 @@ npm run test:browser                          # builds the Worker, then runs the
 
 CI must install the browser before running the suite — the same `npx playwright install --with-deps chromium` command, which also fetches the system libraries Chromium needs on Linux.
 
-For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions repeats the dependency audit, lint, and production build on every push and pull request, while Dependabot monitors npm updates weekly.
+For the active security smoke suite, start the local server in one terminal and run `npm run test:security` in another. It verifies authorization boundaries, security headers, CSRF defenses, durable login throttling, signed-session tamper resistance, OAuth state validation, and upload signature checks. GitHub Actions runs lint, TypeScript, Worker integration, and browser checks for changes targeting the default branch. A separate workflow runs the production dependency audit.
 
 ## iOS build and installation
 

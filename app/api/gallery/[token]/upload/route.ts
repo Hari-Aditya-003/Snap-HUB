@@ -5,7 +5,7 @@ import { getAlbumByToken } from "@/lib/data";
 import { deleteDriveFile, ensureEventDriveFolders, GoogleDriveError, uploadDriveMedia } from "@/lib/google-drive";
 import { canViewGallery } from "@/lib/security";
 import { isRateLimited } from "@/lib/rate-limit";
-import { parseKnownSaved, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
+import { readUploadKeys, saveMediaFiles, splitMediaFiles, type UploadOutcome } from "@/lib/uploads";
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
@@ -36,6 +36,8 @@ export async function POST(request: Request, context: { params: Promise<{ token:
     if (!collection) return NextResponse.json({ error: "That album is not part of this event" }, { status: 400 });
   }
 
+  const keys = readUploadKeys(form, files);
+  if (!keys) return NextResponse.json({ error: "Invalid upload identity" }, { status: 400 });
   const { accepted, rejected } = await splitMediaFiles(files);
   if (!accepted.length) {
     return NextResponse.json({ error: "Files must be photos or videos under 75 MB", rejected }, { status: 400 });
@@ -46,9 +48,8 @@ export async function POST(request: Request, context: { params: Promise<{ token:
   try {
     const folders = await ensureEventDriveFolders(album, request);
     await saveMediaFiles(env.DB, accepted, {
-      albumId: album.id, uploaderName, source: "guest",
-    }, parseKnownSaved(form.get("knownSaved")), async (file) => {
-      const photoId = crypto.randomUUID();
+      albumId: album.id, source: "guest",
+    }, keys, async (file, photoId) => {
       const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" }, request);
       try {
         await env.DB.prepare(
@@ -61,7 +62,7 @@ export async function POST(request: Request, context: { params: Promise<{ token:
         await deleteDriveFile(uploaded.id, request).catch(() => undefined);
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
-      return { id: photoId, moderationStatus };
+      return moderationStatus;
     }, outcome);
   } catch (error) {
     // Photos that committed before the failure still count as guest uploads.

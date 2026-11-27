@@ -78,7 +78,7 @@ const GRADIENTS: ReadonlyArray<readonly [readonly [number, number, number], read
 ];
 
 async function deflate(bytes: Uint8Array) {
-  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate"));
+  const stream = new Blob([new Uint8Array(bytes)]).stream().pipeThrough(new CompressionStream("deflate"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
@@ -191,5 +191,5 @@ export async function sampleMediaResponse(
   }
 
   headers.set("Content-Length", String(bytes.length));
-  return new Response(bytes, { status: 200, headers });
+  return new Response(new Uint8Array(bytes), { status: 200, headers });
 }

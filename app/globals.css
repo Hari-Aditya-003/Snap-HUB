@@ -427,3 +427,19 @@ img, video { max-width: 100%; }
   .live-show-stage > button:first-child { left: .5rem; }
   .live-show-stage > button:last-child { right: .5rem; }
 }
+
+.upload-summary {
+  margin-top: 0.875rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid #efccde;
+  border-radius: 0.75rem;
+  background: #fff9fc;
+  color: #33142a;
+  overflow-wrap: anywhere;
+}
+.upload-summary ul {
+  margin: 0.25rem 0 0.75rem;
+  padding-inline-start: 1.125rem;
+  list-style: disc;
+}
+.upload-summary ul:last-child { margin-bottom: 0; }

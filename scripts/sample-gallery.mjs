@@ -83,8 +83,9 @@ function ensureDevVars() {
         "SAMPLE_MEDIA=1",
         "",
       ].join("\n"),
+      { mode: 0o600, flag: "wx" },
     );
-    console.log(`Created .dev.vars with throwaway local credentials (admin / ${password}) and SAMPLE_MEDIA=1.`);
+    console.log("Created .dev.vars with throwaway local sign-in values and SAMPLE_MEDIA=1.");
     return;
   }
   const current = readFileSync(devVarsPath, "utf8");
@@ -96,7 +97,7 @@ function ensureDevVars() {
     // SAMPLE_MEDIA=0 (or anything else) disables the generated media route, so
     // the seeded gallery would 404 — flip it back on in place.
     writeFileSync(devVarsPath, current.replace(/^SAMPLE_MEDIA=.*$/m, "SAMPLE_MEDIA=1"));
-    console.log(`Set SAMPLE_MEDIA=1 in .dev.vars (was "${sampleMediaSetting[1].trim()}") so the seeded media is served locally.`);
+    console.log("Enabled SAMPLE_MEDIA in .dev.vars so the seeded media is served locally.");
   }
   if (!/^SESSION_SECRET=/m.test(current) || !/^ADMIN_USERNAME=/m.test(current) || !/^ADMIN_PASSWORD=/m.test(current)) {
     console.warn("Note: .dev.vars lacks ADMIN_USERNAME/ADMIN_PASSWORD/SESSION_SECRET — /admin sign-in will fail without them.");

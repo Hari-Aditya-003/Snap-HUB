@@ -297,12 +297,12 @@ async function findOrCreateRootFolder(token: string) {
 
 export async function saveGoogleDriveConnection(refreshToken: string, accessTokenValue: string, email: string) {
   const previous = await getConnectionRow();
-  // Reconnecting with a *different* Google account swaps which Drive owns the
-  // root folder, but every album keeps the folder IDs created under the
-  // previous account — those folders stay unreachable from the new account.
-  // Detection + a dashboard warning is the pragmatic guard; migrating folder
-  // IDs is deliberately out of scope.
-  const accountChanged = Boolean(previous && previous.email.toLowerCase() !== email.toLowerCase());
+  if (previous && previous.email.toLowerCase() !== email.toLowerCase()) {
+    const eventWithDriveMedia = await env.DB.prepare("SELECT 1 FROM albums WHERE drive_folder_id IS NOT NULL LIMIT 1").first();
+    if (eventWithDriveMedia) {
+      throw new GoogleDriveError("Reconnect the Google account already associated with Snap HUB.", 409);
+    }
+  }
   const rootFolderId = await findOrCreateRootFolder(accessTokenValue);
   const encryptedRefreshToken = await encryptRefreshToken(refreshToken);
   const now = Date.now();
@@ -313,7 +313,7 @@ export async function saveGoogleDriveConnection(refreshToken: string, accessToke
        email = excluded.email, root_folder_id = excluded.root_folder_id, updated_at = excluded.updated_at`,
   ).bind(CONNECTION_ID, encryptedRefreshToken, email, rootFolderId, now, now).run();
   grantHealth.seedCache({ token: accessTokenValue, expiresAt: now + 50 * 60 * 1000, connectionUpdatedAt: now });
-  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId), previousEmail: previous?.email ?? null, accountChanged };
+  return { email, rootFolderId, rootFolderUrl: driveFolderUrl(rootFolderId) };
 }
 
 export function driveFolderUrl(folderId: string) {
@@ -487,7 +487,7 @@ export async function driveMediaResponse(fileId: string, request: Request, optio
     if (range && (range[1] || range[2])) {
       const total = media.body.byteLength;
       const start = range[1] ? Number(range[1]) : Math.max(0, total - Number(range[2]));
-      const end = range[2] ? Math.min(total - 1, Number(range[2])) : total - 1;
+      const end = range[1] && range[2] ? Math.min(total - 1, Number(range[2])) : total - 1;
       if (start >= 0 && start <= end && end < total) {
         headers.set("Content-Range", `bytes ${start}-${end}/${total}`);
         headers.set("Content-Length", String(end - start + 1));

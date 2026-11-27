@@ -7,8 +7,9 @@ import {
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import Link from "next/link";
+import { UploadSummary, type UploadFeedback } from "./upload-summary";
 import {
-  countSavedUploads, describeNames, describeRejected, filterUnsentFiles, UPLOAD_TIMEOUT_MS,
+  describeNames, describeRejected, prepareUploads, UPLOAD_TIMEOUT_MS, type UploadSelection,
 } from "@/lib/uploads";
 
 type GalleryMedia = {
@@ -28,7 +29,7 @@ type GalleryViewProps = {
 
 type Filter = "all" | "photos" | "videos" | "highlights" | "favorites";
 
-type UploadPhotoResult = { id: string; filename: string; size?: number; moderationStatus?: string };
+type UploadPhotoResult = { id: string; filename: string; size?: number; moderationStatus?: string; uploadKey?: string };
 type UploadResult = {
   photos?: UploadPhotoResult[];
   rejected?: Array<{ filename: string; reason: string }>;
@@ -49,7 +50,8 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [savedUploads, setSavedUploads] = useState<Map<string, number>>(new Map());
+  const uploadSelection = useRef<UploadSelection | null>(null);
+  const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(`snap-hub-favorites:${token}`);
@@ -149,13 +151,10 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       return false;
     }
   }
-  function rememberSaved(photos?: UploadPhotoResult[]) {
-    if (!photos?.length) return;
-    setSavedUploads((current) => countSavedUploads(current, photos));
-  }
   function closeUploadPanel() {
     setUploadOpen(false);
-    setSavedUploads(new Map());
+    uploadSelection.current = null;
+    setUploadFeedback(null);
   }
   async function upload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -163,22 +162,17 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     const body = new FormData(form);
     const picker = form.querySelector<HTMLInputElement>('input[name="photos"]');
     const selected = picker?.files ? [...picker.files] : [];
-    const filesToSend = filterUnsentFiles(selected, savedUploads);
-    const alreadySaved = selected.length - filesToSend.length;
-    if (alreadySaved) {
-      body.delete("photos");
-      for (const file of filesToSend) body.append("photos", file);
-    }
-    if (!filesToSend.length) {
+    const { selection, count, alreadySaved } = prepareUploads(body, selected, uploadSelection.current);
+    uploadSelection.current = selection;
+    if (!count) {
       toast.info(alreadySaved
         ? "Those memories are already saved — choose different files or close this panel"
         : "Choose at least one photo or video");
       return;
     }
     if (alreadySaved) {
-      toast.info(`${alreadySaved} already saved — sending only the remaining ${filesToSend.length}`);
+      toast.info(`${alreadySaved} already saved — sending only the remaining ${count}`);
     }
-    if (savedUploads.size) body.set("knownSaved", JSON.stringify(Object.fromEntries(savedUploads)));
 
     setUploading(true);
     let response: Response | null = null;
@@ -197,7 +191,8 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
 
     const rejected = Array.isArray(data?.rejected) ? data.rejected : [];
     const savedPhotos = Array.isArray(data?.photos) ? data.photos : [];
-    rememberSaved(savedPhotos);
+    for (const photo of savedPhotos) if (photo.uploadKey) selection.saved.add(photo.uploadKey);
+    setUploadFeedback({ saved: savedPhotos.map((photo) => photo.filename), rejected });
 
     if (!response.ok) {
       const detail = describeRejected(rejected);
@@ -226,7 +221,8 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
     }
 
     form.reset();
-    setSavedUploads(new Map());
+    uploadSelection.current = null;
+    setUploadFeedback(null);
     toast.success(data.moderationStatus === "approved" ? "Your memories are now in the gallery" : "Uploaded — the host will approve these memories");
     if (refreshFailed) toast.info("Saved — but the gallery couldn't refresh. Reload the page to see your new memories.");
     setUploadOpen(false);
@@ -259,14 +255,15 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       </section>
 
       {uploadOpen && album.allowGuestUploads && <section className="guest-upload-panel">
-        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={closeUploadPanel} aria-label="Close upload"><X /></button></div>
+        <div className="panel-heading"><div><span><ImageUp /></span><div><h2>Share your memories</h2><p>Photos and videos can be reviewed by the host before everyone sees them.</p></div></div><button onClick={closeUploadPanel} disabled={uploading} aria-label="Close upload"><X /></button></div>
         <form onSubmit={upload}>
           <label>Your name<input name="uploaderName" maxLength={80} placeholder="How should the host know you?" /></label>
           <label>Caption<input name="caption" maxLength={240} placeholder="A short memory or message" /></label>
           {collections.length > 0 && <label>Album<select name="collectionId">{collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name}</option>)}</select></label>}
-          <label className="guest-file-picker"><ImageUp /><span><strong>Choose photos or videos</strong><small>Up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required /></label>
+          <label className="guest-file-picker"><ImageUp /><span><strong>Choose photos or videos</strong><small>Up to 75 MB each</small></span><input type="file" name="photos" accept="image/*,video/*" multiple required disabled={uploading} onChange={() => setUploadFeedback(null)} /></label>
           <button disabled={uploading}>{uploading ? "Uploading…" : album.moderationMode === "manual" ? "Send for approval" : "Add to gallery"}</button>
         </form>
+        <UploadSummary feedback={uploadFeedback} />
       </section>}
 
       <section className="gallery-toolbar">
@@ -302,12 +299,12 @@ export function GalleryView({ album, token, media: initialMedia, collections }: 
       {active && <div className="slideshow" role="dialog" aria-modal="true" aria-label="Memory viewer" ref={viewerRef} tabIndex={-1}>
         <p className="sr-only" role="status">{`Memory ${(viewerIndex ?? 0) + 1} of ${filtered.length}: ${active.caption || active.filename}`}</p>
         <button className="close-show" onClick={() => setViewerIndex(null)} aria-label="Close viewer"><X /></button>
-        <button className="slide-nav prev" onClick={() => move(-1)} aria-label="Previous memory"><ChevronLeft /></button>
+        <button className="slide-nav prev" disabled={filtered.length < 2} onClick={() => move(-1)} aria-label="Previous memory"><ChevronLeft /></button>
         <div className="slide-stage">
           {active.contentType.startsWith("video/") ? <video key={active.id} src={src(active)} controls autoPlay playsInline /> : <img key={active.id} src={src(active)} alt={active.caption || active.filename} decoding="async" />}
           <div className="slide-info"><div><strong>{active.caption || active.filename}</strong><span>{(viewerIndex ?? 0) + 1} of {filtered.length}</span></div><button onClick={() => toggleFavorite(active.id)}><Heart /> {favorites.has(active.id) ? "Saved" : "Save"}</button>{album.downloadsEnabled && <a href={`${src(active)}?download=1`}><Download /> Download</a>}</div>
         </div>
-        <button className="slide-nav next" onClick={() => move(1)} aria-label="Next memory"><ChevronRight /></button>
+        <button className="slide-nav next" disabled={filtered.length < 2} onClick={() => move(1)} aria-label="Next memory"><ChevronRight /></button>
       </div>}
     </main>
   );

@@ -21,43 +21,29 @@ export const MAX_MEDIA_FILE_SIZE = 75 * 1024 * 1024;
 
 export type MediaRejection = { filename: string; reason: string };
 
-// Retries of an upload that committed before its response was lost must not
-// create duplicate gallery entries, so a matching row inside this window is
-// reported as already saved instead of being inserted again.
-export const UPLOAD_RETRY_WINDOW_MS = 10 * 60 * 1000;
-
-// How many saves of each `filename:size` key the browser already knows about —
-// the upload form posts this back so the server can line retried files up with
-// the rows an earlier attempt committed.
-export function parseKnownSaved(raw: FormDataEntryValue | null): Map<string, number> {
-  const known = new Map<string, number>();
-  if (typeof raw !== "string" || !raw) return known;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    for (const [key, value] of Object.entries(parsed)) {
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-        known.set(key, Math.floor(value));
-      }
-    }
-  } catch { /* Treat malformed input as "no known saves". */ }
-  return known;
-}
-
-export function mediaUploadKey(name: string, size?: number) {
-  return `${name}:${size ?? ""}`;
-}
-
-// Uploads may carry up to ~100 MB over a guest's mobile connection; a bounded
-// wait keeps a silently dropped connection from disabling the form forever.
 export const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
 
-export function countSavedUploads(current: ReadonlyMap<string, number>, photos: Array<{ filename: string; size?: number }>) {
-  const next = new Map(current);
-  for (const photo of photos) {
-    const key = mediaUploadKey(photo.filename, photo.size);
-    next.set(key, (next.get(key) ?? 0) + 1);
+export type UploadSelection = {
+  files: File[];
+  keys: string[];
+  saved: Set<string>;
+};
+
+export function prepareUploads(body: FormData, files: File[], previous: UploadSelection | null) {
+  const selection = previous && files.length === previous.files.length
+    && files.every((file, index) => file === previous.files[index])
+    ? previous
+    : { files, keys: files.map(() => crypto.randomUUID()), saved: new Set<string>() };
+  body.delete("photos");
+  let count = 0;
+  for (const [index, file] of files.entries()) {
+    const key = selection.keys[index];
+    if (selection.saved.has(key)) continue;
+    body.append("photos", file);
+    body.append("uploadKeys", key);
+    count += 1;
   }
-  return next;
+  return { selection, count, alreadySaved: files.length - count };
 }
 
 export function describeNames(names: string[], max = 3) {
@@ -69,69 +55,66 @@ export function describeRejected(rejected: MediaRejection[], max = 3) {
   return describeNames(rejected.map((item) => `${item.filename} (${item.reason})`), max);
 }
 
-// Removes up to `savedCounts[key]` files per upload key, in order — a batch
-// may hold distinct files that share a name and size, and only the ones the
-// server confirmed should be skipped on retry.
-export function filterUnsentFiles<T extends { name: string; size: number }>(files: T[], savedCounts: ReadonlyMap<string, number>): T[] {
-  const remaining = new Map(savedCounts);
-  return files.filter((file) => {
-    const skipped = remaining.get(mediaUploadKey(file.name, file.size)) ?? 0;
-    if (!skipped) return true;
-    remaining.set(mediaUploadKey(file.name, file.size), skipped - 1);
-    return false;
-  });
+export function readUploadKeys(body: FormData, files: File[]) {
+  const keys = body.getAll("uploadKeys");
+  if (!keys.length) return new Map<File, string>();
+  if (keys.length !== files.length || new Set(keys).size !== keys.length) return null;
+  const byFile = new Map<File, string>();
+  for (const [index, key] of keys.entries()) {
+    if (typeof key !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(key)) return null;
+    byFile.set(files[index], key);
+  }
+  return byFile;
 }
 
-export type RecentUploadMatch = {
-  albumId: string; filename: string; size: number; uploaderName: string; source: "guest" | "host";
+type UploadScope = { albumId: string; source: "guest" | "host" };
+export type SavedUploadPhoto = {
+  id: string; filename: string; size: number; moderationStatus: string; uploadKey?: string;
 };
-
-// Returns the prior row occupying `position` in upload order for this file's
-// key, or null when fewer prior rows exist — meaning this occurrence still
-// needs to be inserted. Position is per-key across attempts (known saves plus
-// earlier occurrences in this request), so distinct files that happen to share
-// a name and size are matched with distinct rows instead of collapsing onto
-// the newest one.
-export async function findRecentUpload(db: D1Database, match: RecentUploadMatch, position: number) {
-  const row = await db.prepare(
-    `SELECT id, moderation_status FROM photos
-     WHERE album_id = ? AND filename = ? AND size = ? AND uploader_name = ? AND source = ?
-       AND moderation_status != 'rejected' AND created_at > ?
-     ORDER BY created_at ASC LIMIT 1 OFFSET ?`,
-  ).bind(match.albumId, match.filename, match.size, match.uploaderName, match.source,
-    Date.now() - UPLOAD_RETRY_WINDOW_MS, position).first<{ id: string; moderation_status: string }>();
-  return row ? { id: row.id, moderationStatus: row.moderation_status } : null;
-}
-
-export type SavedUploadPhoto = { id: string; filename: string; size: number; moderationStatus: string };
 export type UploadOutcome = { photos: SavedUploadPhoto[]; inserted: number };
 
-// Shared per-file save flow for the guest and host upload routes. Each file is
-// matched against prior rows at its upload position and reported as already
-// saved when a retry covers it; the rest go through `save` (Drive upload plus
-// photo insert). `outcome` is caller-owned so files saved before a mid-batch
-// failure are still visible to the error path.
+async function uploadPhotoId(scope: UploadScope, key: string) {
+  const value = new TextEncoder().encode(JSON.stringify([scope.albumId, scope.source, key]));
+  const hash = await crypto.subtle.digest("SHA-256", value);
+  return "upload-" + Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function savedPhoto(db: D1Database, scope: UploadScope, id: string) {
+  return db.prepare(
+    "SELECT filename, size, moderation_status FROM photos WHERE id = ? AND album_id = ? AND source = ?",
+  ).bind(id, scope.albumId, scope.source).first<{ filename: string; size: number; moderation_status: string }>();
+}
+
 export async function saveMediaFiles(
   db: D1Database,
   files: File[],
-  match: { albumId: string; uploaderName: string; source: "guest" | "host" },
-  knownSaved: ReadonlyMap<string, number>,
-  save: (file: File) => Promise<{ id: string; moderationStatus: string }>,
+  scope: UploadScope,
+  keys: ReadonlyMap<File, string>,
+  save: (file: File, photoId: string) => Promise<string>,
   outcome: UploadOutcome = { photos: [], inserted: 0 },
 ): Promise<UploadOutcome> {
-  const positions = new Map(knownSaved);
   for (const file of files) {
-    const key = mediaUploadKey(file.name, file.size);
-    const position = positions.get(key) ?? 0;
-    positions.set(key, position + 1);
-    const recent = await findRecentUpload(db, { ...match, filename: file.name, size: file.size }, position);
-    if (recent) {
-      outcome.photos.push({ id: recent.id, filename: file.name, size: file.size, moderationStatus: recent.moderationStatus });
-      continue;
+    const uploadKey = keys.get(file);
+    const id = uploadKey ? await uploadPhotoId(scope, uploadKey) : crypto.randomUUID();
+    let prior = uploadKey ? await savedPhoto(db, scope, id) : null;
+    let moderationStatus: string;
+    if (!prior) {
+      try {
+        moderationStatus = await save(file, id);
+        outcome.photos.push({ id, filename: file.name, size: file.size, moderationStatus, uploadKey });
+        outcome.inserted += 1;
+        continue;
+      } catch (error) {
+        // A concurrent retry can win the primary-key insert. The save callback
+        // has already discarded its own Drive object in that case.
+        prior = uploadKey ? await savedPhoto(db, scope, id) : null;
+        if (!prior) throw error;
+      }
     }
-    const saved = await save(file);
-    outcome.photos.push({ id: saved.id, filename: file.name, size: file.size, moderationStatus: saved.moderationStatus });
-    outcome.inserted += 1;
+    if (prior.filename !== file.name || prior.size !== file.size) {
+      throw new Error("Upload identity already belongs to another file");
+    }
+    outcome.photos.push({ id, filename: file.name, size: file.size, moderationStatus: prior.moderation_status, uploadKey });
   }
   return outcome;
 }

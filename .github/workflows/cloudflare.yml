@@ -23,5 +23,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
       - name: Validate the deployable Worker bundle
         run: npx wrangler deploy --config dist/server/wrangler.json --dry-run
