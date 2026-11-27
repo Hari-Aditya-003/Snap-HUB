@@ -8,5 +8,6 @@ declare namespace Cloudflare {
     GOOGLE_CLIENT_SECRET: string;
     /** Local-only: serve generated sample-gallery media (never set in production). */
     SAMPLE_MEDIA?: string;
+    SNAP_HUB_FAKE_DRIVE?: string;
   }
 }

@@ -35,6 +35,8 @@ npm test
 
 Working on the guest gallery? `npm run sample:gallery` seeds a local-only sample event with generated photos and videos — no Cloudflare or Google account needed. See [local development](README.md#local-web-development) for the gallery URL and reset commands.
 
+`npm run test:browser` runs the Playwright smoke tests using a disposable D1 database and a local Drive stub. First run `npx playwright install --with-deps chromium`.
+
 Use synthetic event media and your own OAuth test project for Drive checks. Follow the [deployment guide](docs/DEPLOYMENT.md) to set up a separate Worker and D1 database for a fork.
 
 ## Submit a pull request

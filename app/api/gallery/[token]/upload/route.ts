@@ -44,12 +44,12 @@ export async function POST(request: Request, context: { params: Promise<{ token:
   const moderationStatus = album.moderation_mode === "instant" ? "approved" : "pending";
   const outcome: UploadOutcome = { photos: [], inserted: 0 };
   try {
-    const folders = await ensureEventDriveFolders(album);
+    const folders = await ensureEventDriveFolders(album, request);
     await saveMediaFiles(env.DB, accepted, {
       albumId: album.id, uploaderName, source: "guest",
     }, parseKnownSaved(form.get("knownSaved")), async (file) => {
       const photoId = crypto.randomUUID();
-      const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" });
+      const uploaded = await uploadDriveMedia(file, folders.guestUploadsFolderId, { albumId: album.id, photoId, source: "guest" }, request);
       try {
         await env.DB.prepare(
           `INSERT INTO photos (id, album_id, object_key, filename, content_type, caption,
@@ -58,7 +58,7 @@ export async function POST(request: Request, context: { params: Promise<{ token:
         ).bind(photoId, album.id, uploaded.id, file.name, file.type, caption, collectionId,
           moderationStatus, uploaderName, file.size, Date.now()).run();
       } catch {
-        await deleteDriveFile(uploaded.id).catch(() => undefined);
+        await deleteDriveFile(uploaded.id, request).catch(() => undefined);
         throw new GoogleDriveError("The upload reached Google Drive but could not be added to the event.", 500);
       }
       return { id: photoId, moderationStatus };

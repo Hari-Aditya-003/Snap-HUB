@@ -56,13 +56,42 @@ before(async () => {
 }, { timeout: 120_000 });
 
 after(async () => {
-  if (server && server.exitCode === null) {
+  if (server && server.exitCode === null && server.pid) {
     const stopped = new Promise((done) => server.once("exit", done));
-    if (process.platform === "win32") server.kill("SIGTERM");
-    else process.kill(-server.pid, "SIGTERM");
-    await stopped;
+    if (process.platform === "win32") {
+      // `wrangler dev` spawns workerd.exe children that keep D1 sqlite files
+      // locked. SIGTERM on Windows only reaches the node process, so stop the
+      // whole tree.
+      spawnSync("taskkill", ["/pid", String(server.pid), "/t"], { stdio: "ignore" });
+    } else {
+      process.kill(-server.pid, "SIGTERM");
+    }
+    const exited = await Promise.race([stopped.then(() => true), delay(15_000).then(() => false)]);
+    if (!exited && server.exitCode === null) {
+      // The graceful stop did not take — force-kill the remaining tree and
+      // fail loudly if even that does not work.
+      if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore" });
+      else process.kill(-server.pid, "SIGKILL");
+      await Promise.race([stopped, delay(10_000)]);
+      assert.ok(server.exitCode !== null, "Local Worker did not exit after force-kill");
+    }
   }
-  if (state) rmSync(state, { recursive: true, force: true });
+  // File locks can outlive the process briefly on Windows; retry, then surface
+  // the cleanup failure instead of silently leaving state behind.
+  if (state) {
+    let lastError;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        rmSync(state, { recursive: true, force: true });
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        await delay(500);
+      }
+    }
+    assert.equal(lastError, undefined, `Could not remove temporary state directory ${state}`);
+  }
 });
 
 test("deployment artifact contains D1 migrations and needs no Sites bindings", () => {
